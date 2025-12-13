@@ -86,10 +86,10 @@ function OddsBox({
   highlight?: boolean;
 }) {
   return (
-    <div className={`flex flex-col items-center justify-center px-4 py-2 h-14 rounded-lg border transition-all cursor-pointer hover:bg-slate-700 ${
+    <div className={`flex flex-col items-center justify-center w-full h-14 rounded-lg border transition-all cursor-pointer hover:bg-slate-700 ${
       highlight ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-700 bg-slate-800/50'
     }`}>
-      <span className="text-white text-sm font-medium">{topValue}</span>
+      <span className="text-white text-xs font-medium leading-tight">{topValue || '\u00A0'}</span>
       <span className={`text-sm font-bold ${isPositive ? 'text-emerald-400' : 'text-blue-400'}`}>
         {bottomValue}
       </span>
