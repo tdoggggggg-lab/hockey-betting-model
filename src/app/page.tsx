@@ -1,173 +1,196 @@
-import GameCard from '@/components/GameCard';
+'use client';
+
+import { useState } from 'react';
+import LeagueTabs from '@/components/LeagueTabs';
+import DateTabs from '@/components/DateTabs';
+import BetTypesTabs from '@/components/BetTypesTabs';
+import GamesTable from '@/components/GamesTable';
 
 // Mock data for now - will be replaced with real API calls
 const mockGames = [
   {
     id: '1',
-    homeTeam: { id: 1, name: 'Colorado Avalanche', abbreviation: 'COL' },
-    awayTeam: { id: 2, name: 'Vegas Golden Knights', abbreviation: 'VGK' },
+    homeTeam: { id: 19, name: 'St. Louis Blues', abbreviation: 'STL' },
+    awayTeam: { id: 16, name: 'Chicago Blackhawks', abbreviation: 'CHI' },
     startTime: new Date(Date.now() + 3600000).toISOString(),
     status: 'scheduled' as const,
     prediction: {
-      homeWinProbability: 0.52,
-      awayWinProbability: 0.48,
-      predictedTotal: 6.2,
+      homeWinProbability: 0.58,
+      awayWinProbability: 0.42,
+      predictedTotal: 5.8,
       confidence: 0.72,
     },
     odds: [
       {
         bookmaker: 'DraftKings',
-        homeMoneyline: -125,
-        awayMoneyline: +105,
+        homeMoneyline: -115,
+        awayMoneyline: -105,
         homeSpread: -1.5,
-        homeSpreadOdds: +165,
-        awaySpreadOdds: -195,
-        totalLine: 6.5,
-        overOdds: -110,
-        underOdds: -110,
-      },
-      {
-        bookmaker: 'FanDuel',
-        homeMoneyline: -130,
-        awayMoneyline: +108,
-        homeSpread: -1.5,
-        homeSpreadOdds: +170,
-        awaySpreadOdds: -200,
-        totalLine: 6.5,
-        overOdds: -108,
-        underOdds: -112,
+        homeSpreadOdds: -278,
+        awaySpreadOdds: +225,
+        totalLine: 5.5,
+        overOdds: -112,
+        underOdds: -108,
       },
     ],
   },
   {
     id: '2',
-    homeTeam: { id: 3, name: 'Toronto Maple Leafs', abbreviation: 'TOR' },
-    awayTeam: { id: 4, name: 'Boston Bruins', abbreviation: 'BOS' },
+    homeTeam: { id: 55, name: 'Utah Hockey Club', abbreviation: 'UTA' },
+    awayTeam: { id: 55, name: 'Seattle Kraken', abbreviation: 'SEA' },
     startTime: new Date(Date.now() + 7200000).toISOString(),
     status: 'scheduled' as const,
     prediction: {
-      homeWinProbability: 0.45,
-      awayWinProbability: 0.55,
-      predictedTotal: 5.8,
+      homeWinProbability: 0.55,
+      awayWinProbability: 0.45,
+      predictedTotal: 5.5,
       confidence: 0.68,
     },
     odds: [
       {
         bookmaker: 'DraftKings',
-        homeMoneyline: +110,
-        awayMoneyline: -130,
-        homeSpread: +1.5,
-        homeSpreadOdds: -180,
-        awaySpreadOdds: +155,
-        totalLine: 6,
-        overOdds: -105,
-        underOdds: -115,
+        homeMoneyline: -185,
+        awayMoneyline: +154,
+        homeSpread: -1.5,
+        homeSpreadOdds: +142,
+        awaySpreadOdds: -170,
+        totalLine: 5.5,
+        overOdds: -115,
+        underOdds: -105,
       },
     ],
   },
   {
     id: '3',
-    homeTeam: { id: 5, name: 'Edmonton Oilers', abbreviation: 'EDM' },
-    awayTeam: { id: 6, name: 'Calgary Flames', abbreviation: 'CGY' },
+    homeTeam: { id: 1, name: 'New Jersey Devils', abbreviation: 'NJD' },
+    awayTeam: { id: 24, name: 'Anaheim Ducks', abbreviation: 'ANA' },
     startTime: new Date(Date.now() + 10800000).toISOString(),
     status: 'scheduled' as const,
     prediction: {
-      homeWinProbability: 0.61,
-      awayWinProbability: 0.39,
-      predictedTotal: 6.5,
+      homeWinProbability: 0.62,
+      awayWinProbability: 0.38,
+      predictedTotal: 6.2,
       confidence: 0.75,
     },
     odds: [
       {
-        bookmaker: 'BetMGM',
-        homeMoneyline: -165,
-        awayMoneyline: +140,
+        bookmaker: 'FanDuel',
+        homeMoneyline: -120,
+        awayMoneyline: +100,
         homeSpread: -1.5,
-        homeSpreadOdds: +130,
-        awaySpreadOdds: -150,
+        homeSpreadOdds: +205,
+        awaySpreadOdds: -260,
         totalLine: 6.5,
-        overOdds: -110,
-        underOdds: -110,
+        overOdds: +105,
+        underOdds: -140,
+      },
+    ],
+  },
+  {
+    id: '4',
+    homeTeam: { id: 9, name: 'Ottawa Senators', abbreviation: 'OTT' },
+    awayTeam: { id: 3, name: 'New York Rangers', abbreviation: 'NYR' },
+    startTime: new Date(Date.now() + 14400000).toISOString(),
+    status: 'scheduled' as const,
+    prediction: {
+      homeWinProbability: 0.48,
+      awayWinProbability: 0.52,
+      predictedTotal: 5.9,
+      confidence: 0.70,
+    },
+    odds: [
+      {
+        bookmaker: 'BetMGM',
+        homeMoneyline: +100,
+        awayMoneyline: -120,
+        homeSpread: +1.5,
+        homeSpreadOdds: -260,
+        awaySpreadOdds: +200,
+        totalLine: 5.5,
+        overOdds: -115,
+        underOdds: -105,
       },
     ],
   },
 ];
 
 export default function Home() {
+  const [activeLeague, setActiveLeague] = useState('nhl');
+  const [activeDate, setActiveDate] = useState(new Date().toISOString().split('T')[0]);
+  const [activeBetType, setActiveBetType] = useState('game-lines');
+
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      {/* Hero Section */}
-      <div className="text-center mb-12">
-        <h1 className="text-4xl font-bold mb-4">
-          NHL Betting <span className="text-blue-400">Predictions</span>
-        </h1>
-        <p className="text-slate-400 max-w-2xl mx-auto">
-          AI-powered predictions with live odds comparison from top sportsbooks. 
-          Our model analyzes expected goals, possession metrics, and historical performance.
-        </p>
-      </div>
+    <div className="min-h-screen bg-slate-950">
+      {/* League Tabs */}
+      <LeagueTabs 
+        activeLeague={activeLeague} 
+        onLeagueChange={setActiveLeague} 
+      />
 
-      {/* Stats Banner */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
-        <div className="bg-slate-800/50 rounded-xl p-4 text-center">
-          <div className="text-3xl font-bold text-blue-400">62%</div>
-          <div className="text-slate-400 text-sm">Model Accuracy</div>
-        </div>
-        <div className="bg-slate-800/50 rounded-xl p-4 text-center">
-          <div className="text-3xl font-bold text-green-400">+8.2%</div>
-          <div className="text-slate-400 text-sm">ROI This Season</div>
-        </div>
-        <div className="bg-slate-800/50 rounded-xl p-4 text-center">
-          <div className="text-3xl font-bold text-purple-400">1,247</div>
-          <div className="text-slate-400 text-sm">Games Analyzed</div>
-        </div>
-        <div className="bg-slate-800/50 rounded-xl p-4 text-center">
-          <div className="text-3xl font-bold text-amber-400">40+</div>
-          <div className="text-slate-400 text-sm">Bookmakers</div>
-        </div>
-      </div>
-
-      {/* League Filter */}
-      <div className="flex gap-2 mb-6">
-        <button className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium">
-          NHL
-        </button>
-        <button className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg font-medium hover:bg-slate-700">
-          4 Nations
-        </button>
-        <button className="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg font-medium hover:bg-slate-700">
-          Olympics
-        </button>
-      </div>
-
-      {/* Today's Games Header */}
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold">Today&apos;s Games</h2>
-        <div className="text-slate-400 text-sm">
-          {new Date().toLocaleDateString('en-US', { 
-            weekday: 'long', 
-            month: 'long', 
-            day: 'numeric' 
-          })}
+      {/* Hero Stats Bar */}
+      <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-b border-slate-800">
+        <div className="max-w-7xl mx-auto px-4 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-2xl">🏒</span>
+              <div>
+                <h1 className="text-xl font-bold text-white">NHL Odds</h1>
+                <p className="text-slate-400 text-sm">Live lines from 40+ sportsbooks</p>
+              </div>
+            </div>
+            <div className="hidden md:flex items-center gap-6">
+              <div className="text-center">
+                <div className="text-2xl font-bold text-emerald-400">62%</div>
+                <div className="text-xs text-slate-500">Model Accuracy</div>
+              </div>
+              <div className="w-px h-10 bg-slate-700" />
+              <div className="text-center">
+                <div className="text-2xl font-bold text-blue-400">+8.2%</div>
+                <div className="text-xs text-slate-500">Season ROI</div>
+              </div>
+              <div className="w-px h-10 bg-slate-700" />
+              <div className="text-center">
+                <div className="text-2xl font-bold text-purple-400">1,247</div>
+                <div className="text-xs text-slate-500">Games Analyzed</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Games Grid */}
-      <div className="grid gap-6">
-        {mockGames.map((game) => (
-          <GameCard key={game.id} game={game} />
-        ))}
-      </div>
+      {/* Bet Types Tabs */}
+      <BetTypesTabs 
+        activeType={activeBetType} 
+        onTypeChange={setActiveBetType} 
+      />
 
-      {/* Info Box */}
-      <div className="mt-12 bg-slate-800/30 border border-slate-700 rounded-xl p-6">
-        <h3 className="text-lg font-semibold mb-2">📊 How Our Model Works</h3>
-        <p className="text-slate-400 text-sm">
-          Our prediction model uses expected goals (xG), Corsi/Fenwick possession metrics, 
-          goalie performance (GSAx), and situational factors like back-to-back games and home ice advantage. 
-          The model is trained on 10+ years of NHL data and updates daily. 
-          <a href="/model" className="text-blue-400 hover:underline ml-1">Learn more →</a>
-        </p>
+      {/* Date Tabs */}
+      <DateTabs 
+        activeDate={activeDate} 
+        onDateChange={setActiveDate} 
+      />
+
+      {/* Games Content */}
+      <div className="max-w-7xl mx-auto py-4">
+        <GamesTable 
+          games={mockGames} 
+          dateLabel="Today" 
+        />
+
+        {/* Info Banner */}
+        <div className="mx-4 mt-8 p-4 bg-slate-900/50 border border-slate-800 rounded-xl">
+          <div className="flex items-start gap-3">
+            <span className="text-2xl">🤖</span>
+            <div>
+              <h3 className="font-semibold text-white mb-1">AI-Powered Predictions</h3>
+              <p className="text-slate-400 text-sm">
+                Our model uses expected goals (xG), Corsi/Fenwick possession metrics, 
+                goalie performance (GSAx), and situational factors. Historical accuracy: 62% on moneyline picks.
+                <a href="/model" className="text-blue-400 hover:underline ml-1">Learn more →</a>
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
