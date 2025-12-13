@@ -65,12 +65,13 @@ function formatOdds(odds: number): string {
 
 function formatTime(dateString: string): string {
   const date = new Date(dateString);
-  return date.toLocaleTimeString('en-US', { 
+  const timeStr = date.toLocaleTimeString('en-US', { 
     hour: 'numeric', 
     minute: '2-digit',
     hour12: true,
-    timeZoneName: 'short'
-  }).replace(' ', '').toLowerCase();
+  });
+  // Returns something like "7:10 PM MT"
+  return timeStr;
 }
 
 function OddsBox({ 
@@ -85,7 +86,7 @@ function OddsBox({
   highlight?: boolean;
 }) {
   return (
-    <div className={`flex flex-col items-center justify-center px-4 py-2 rounded-lg border transition-all cursor-pointer hover:bg-slate-700 ${
+    <div className={`flex flex-col items-center justify-center px-4 py-2 h-14 rounded-lg border transition-all cursor-pointer hover:bg-slate-700 ${
       highlight ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-700 bg-slate-800/50'
     }`}>
       <span className="text-white text-sm font-medium">{topValue}</span>
@@ -178,13 +179,13 @@ export default function GameRow({ game }: GameRowProps) {
             </div>
             <div className="space-y-2">
               <OddsBox 
-                topValue="" 
+                topValue={game.awayTeam.abbreviation}
                 bottomValue={odds ? formatOdds(odds.awayMoneyline) : '-'}
                 isPositive={odds && odds.awayMoneyline > 0}
                 highlight={odds && odds.awayMoneyline > 0}
               />
               <OddsBox 
-                topValue="" 
+                topValue={game.homeTeam.abbreviation}
                 bottomValue={odds ? formatOdds(odds.homeMoneyline) : '-'}
                 isPositive={odds && odds.homeMoneyline > 0}
                 highlight={odds && odds.homeMoneyline > 0}

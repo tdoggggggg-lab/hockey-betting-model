@@ -1,123 +1,108 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import LeagueTabs from '@/components/LeagueTabs';
 import DateTabs from '@/components/DateTabs';
 import BetTypesTabs from '@/components/BetTypesTabs';
 import GamesTable from '@/components/GamesTable';
 
-// Mock data for now - will be replaced with real API calls
-const mockGames = [
-  {
-    id: '1',
-    homeTeam: { id: 19, name: 'St. Louis Blues', abbreviation: 'STL' },
-    awayTeam: { id: 16, name: 'Chicago Blackhawks', abbreviation: 'CHI' },
-    startTime: new Date(Date.now() + 3600000).toISOString(),
-    status: 'scheduled' as const,
-    prediction: {
-      homeWinProbability: 0.58,
-      awayWinProbability: 0.42,
-      predictedTotal: 5.8,
-      confidence: 0.72,
-    },
-    odds: [
-      {
-        bookmaker: 'DraftKings',
-        homeMoneyline: -115,
-        awayMoneyline: -105,
-        homeSpread: -1.5,
-        homeSpreadOdds: -278,
-        awaySpreadOdds: +225,
-        totalLine: 5.5,
-        overOdds: -112,
-        underOdds: -108,
-      },
-    ],
-  },
-  {
-    id: '2',
-    homeTeam: { id: 55, name: 'Utah Hockey Club', abbreviation: 'UTA' },
-    awayTeam: { id: 55, name: 'Seattle Kraken', abbreviation: 'SEA' },
-    startTime: new Date(Date.now() + 7200000).toISOString(),
-    status: 'scheduled' as const,
-    prediction: {
-      homeWinProbability: 0.55,
-      awayWinProbability: 0.45,
-      predictedTotal: 5.5,
-      confidence: 0.68,
-    },
-    odds: [
-      {
-        bookmaker: 'DraftKings',
-        homeMoneyline: -185,
-        awayMoneyline: +154,
-        homeSpread: -1.5,
-        homeSpreadOdds: +142,
-        awaySpreadOdds: -170,
-        totalLine: 5.5,
-        overOdds: -115,
-        underOdds: -105,
-      },
-    ],
-  },
-  {
-    id: '3',
-    homeTeam: { id: 1, name: 'New Jersey Devils', abbreviation: 'NJD' },
-    awayTeam: { id: 24, name: 'Anaheim Ducks', abbreviation: 'ANA' },
-    startTime: new Date(Date.now() + 10800000).toISOString(),
-    status: 'scheduled' as const,
-    prediction: {
-      homeWinProbability: 0.62,
-      awayWinProbability: 0.38,
-      predictedTotal: 6.2,
-      confidence: 0.75,
-    },
-    odds: [
-      {
-        bookmaker: 'FanDuel',
-        homeMoneyline: -120,
-        awayMoneyline: +100,
-        homeSpread: -1.5,
-        homeSpreadOdds: +205,
-        awaySpreadOdds: -260,
-        totalLine: 6.5,
-        overOdds: +105,
-        underOdds: -140,
-      },
-    ],
-  },
-  {
-    id: '4',
-    homeTeam: { id: 9, name: 'Ottawa Senators', abbreviation: 'OTT' },
-    awayTeam: { id: 3, name: 'New York Rangers', abbreviation: 'NYR' },
-    startTime: new Date(Date.now() + 14400000).toISOString(),
-    status: 'scheduled' as const,
-    prediction: {
-      homeWinProbability: 0.48,
-      awayWinProbability: 0.52,
-      predictedTotal: 5.9,
-      confidence: 0.70,
-    },
-    odds: [
-      {
-        bookmaker: 'BetMGM',
-        homeMoneyline: +100,
-        awayMoneyline: -120,
-        homeSpread: +1.5,
-        homeSpreadOdds: -260,
-        awaySpreadOdds: +200,
-        totalLine: 5.5,
-        overOdds: -115,
-        underOdds: -105,
-      },
-    ],
-  },
-];
+interface Team {
+  id: number;
+  name: string;
+  abbreviation: string;
+}
+
+interface Odds {
+  bookmaker: string;
+  homeMoneyline: number;
+  awayMoneyline: number;
+  homeSpread: number;
+  homeSpreadOdds: number;
+  awaySpreadOdds: number;
+  totalLine: number;
+  overOdds: number;
+  underOdds: number;
+}
+
+interface Prediction {
+  homeWinProbability: number;
+  awayWinProbability: number;
+  predictedTotal: number;
+  confidence: number;
+}
+
+interface Game {
+  id: string;
+  homeTeam: Team;
+  awayTeam: Team;
+  startTime: string;
+  status: 'scheduled' | 'live' | 'final';
+  homeScore?: number;
+  awayScore?: number;
+  prediction?: Prediction;
+  odds: Odds[];
+}
+
+interface GamesData {
+  gamesByDate: Record<string, Game[]>;
+  dates: string[];
+}
 
 export default function Home() {
   const [activeLeague, setActiveLeague] = useState('nhl');
   const [activeDate, setActiveDate] = useState(new Date().toISOString().split('T')[0]);
   const [activeBetType, setActiveBetType] = useState('game-lines');
+  const [gamesData, setGamesData] = useState<GamesData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Fetch games data
+  useEffect(() => {
+    async function fetchGames() {
+      try {
+        setLoading(true);
+        const response = await fetch('/api/games');
+        
+        if (!response.ok) {
+          throw new Error('Failed to fetch games');
+        }
+        
+        const data = await response.json();
+        setGamesData(data);
+        
+        // Set active date to first date with games
+        if (data.dates && data.dates.length > 0) {
+          setActiveDate(data.dates[0]);
+        }
+      } catch (err) {
+        console.error('Error fetching games:', err);
+        setError('Failed to load games. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    }
+    
+    fetchGames();
+    
+    // Refresh every 2 minutes
+    const interval = setInterval(fetchGames, 120000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Get games for the active date
+  const todayGames = gamesData?.gamesByDate?.[activeDate] || [];
+
+  // Format date label
+  const getDateLabel = (dateStr: string) => {
+    const today = new Date().toISOString().split('T')[0];
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+    
+    if (dateStr === today) return 'Today';
+    if (dateStr === tomorrow) return 'Tomorrow';
+    
+    const date = new Date(dateStr + 'T00:00:00');
+    return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  };
 
   return (
     <div className="min-h-screen bg-slate-950">
@@ -150,8 +135,10 @@ export default function Home() {
               </div>
               <div className="w-px h-10 bg-slate-700" />
               <div className="text-center">
-                <div className="text-2xl font-bold text-purple-400">1,247</div>
-                <div className="text-xs text-slate-500">Games Analyzed</div>
+                <div className="text-2xl font-bold text-purple-400">
+                  {loading ? '...' : todayGames.length}
+                </div>
+                <div className="text-xs text-slate-500">Games Today</div>
               </div>
             </div>
           </div>
@@ -172,10 +159,28 @@ export default function Home() {
 
       {/* Games Content */}
       <div className="max-w-7xl mx-auto py-4">
-        <GamesTable 
-          games={mockGames} 
-          dateLabel="Today" 
-        />
+        {loading ? (
+          <div className="flex flex-col items-center justify-center py-20">
+            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+            <p className="text-slate-400">Loading games...</p>
+          </div>
+        ) : error ? (
+          <div className="text-center py-20">
+            <div className="text-4xl mb-4">⚠️</div>
+            <h3 className="text-xl font-medium text-red-400">{error}</h3>
+            <button 
+              onClick={() => window.location.reload()}
+              className="mt-4 px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-500"
+            >
+              Try Again
+            </button>
+          </div>
+        ) : (
+          <GamesTable 
+            games={todayGames} 
+            dateLabel={getDateLabel(activeDate)} 
+          />
+        )}
 
         {/* Info Banner */}
         <div className="mx-4 mt-8 p-4 bg-slate-900/50 border border-slate-800 rounded-xl">
@@ -191,6 +196,25 @@ export default function Home() {
             </div>
           </div>
         </div>
+
+        {/* API Status */}
+        {!process.env.NEXT_PUBLIC_HAS_ODDS_KEY && (
+          <div className="mx-4 mt-4 p-4 bg-amber-900/20 border border-amber-700/50 rounded-xl">
+            <div className="flex items-start gap-3">
+              <span className="text-2xl">⚙️</span>
+              <div>
+                <h3 className="font-semibold text-amber-400 mb-1">Setup Required: Odds API</h3>
+                <p className="text-slate-400 text-sm">
+                  To see live betting odds, add your free API key from{' '}
+                  <a href="https://the-odds-api.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
+                    the-odds-api.com
+                  </a>
+                  {' '}to your Vercel environment variables as <code className="bg-slate-800 px-1 rounded">ODDS_API_KEY</code>.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

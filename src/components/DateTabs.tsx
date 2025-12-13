@@ -19,7 +19,10 @@ function getDateTabs() {
     } else if (i === 1) {
       label = 'Tomorrow';
     } else {
-      label = date.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+      // Format: "Sun 12/14"
+      const weekday = date.toLocaleDateString('en-US', { weekday: 'short' });
+      const monthDay = date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+      label = `${weekday} ${monthDay}`;
     }
     
     tabs.push({
