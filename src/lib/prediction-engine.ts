@@ -393,15 +393,54 @@ export function predictSaves(
 }
 
 /**
- * Calculate confidence score based on sample size
+ * Calculate confidence score based on prediction certainty
+ * Factors: sample size, scoring consistency, matchup clarity
  */
-export function calculateConfidence(gamesPlayed: number): number {
-  // Confidence increases with sample size, max at ~30 games
-  if (gamesPlayed < 5) return 0.3;
-  if (gamesPlayed < 10) return 0.5;
-  if (gamesPlayed < 20) return 0.7;
-  if (gamesPlayed < 30) return 0.85;
-  return 0.95;
+export function calculateConfidence(
+  gamesPlayed: number,
+  goalsPerGame: number,
+  recentGoalsPerGame: number,
+  probability: number
+): number {
+  let confidence = 0;
+  
+  // Factor 1: Sample size (max 0.3)
+  if (gamesPlayed >= 30) {
+    confidence += 0.3;
+  } else if (gamesPlayed >= 20) {
+    confidence += 0.25;
+  } else if (gamesPlayed >= 10) {
+    confidence += 0.15;
+  } else {
+    confidence += 0.05;
+  }
+  
+  // Factor 2: Scoring consistency - how close is recent form to season average (max 0.35)
+  // If recent and season are similar, prediction is more reliable
+  const variance = Math.abs(goalsPerGame - recentGoalsPerGame);
+  if (variance < 0.05) {
+    confidence += 0.35; // Very consistent
+  } else if (variance < 0.15) {
+    confidence += 0.25; // Fairly consistent
+  } else if (variance < 0.25) {
+    confidence += 0.15; // Some variance
+  } else {
+    confidence += 0.05; // High variance, less predictable
+  }
+  
+  // Factor 3: Prediction clarity - extreme probabilities are more certain (max 0.35)
+  // Very high or very low probabilities are more reliable than middle ones
+  if (probability >= 0.45 || probability <= 0.10) {
+    confidence += 0.35; // Clear prediction
+  } else if (probability >= 0.35 || probability <= 0.15) {
+    confidence += 0.25; // Fairly clear
+  } else if (probability >= 0.25 || probability <= 0.20) {
+    confidence += 0.15; // Middle ground
+  } else {
+    confidence += 0.10; // Uncertain range (20-25%)
+  }
+  
+  return Math.min(confidence, 1.0); // Cap at 100%
 }
 
 /**
@@ -465,7 +504,7 @@ export function generateGamePredictions(
       expectedValue: goalPred.expectedGoals,
       probability: goalPred.probability,
       line: 0.5,
-      confidence: calculateConfidence(player.gamesPlayed),
+      confidence: calculateConfidence(player.gamesPlayed, player.goalsPerGame, player.recentGoalsPerGame, goalPred.probability),
       isValueBet: false,
       breakdown: goalPred.breakdown,
     });
@@ -485,7 +524,7 @@ export function generateGamePredictions(
       expectedValue: shotPred.expectedShots,
       probability: shotPred.probability,
       line: 2.5,
-      confidence: calculateConfidence(player.gamesPlayed),
+      confidence: calculateConfidence(player.gamesPlayed, player.shotsPerGame, player.recentShotsPerGame, shotPred.probability),
       isValueBet: false,
       breakdown: shotPred.breakdown,
     });
@@ -505,7 +544,7 @@ export function generateGamePredictions(
       expectedValue: pointPred.expectedPoints,
       probability: pointPred.probability,
       line: 0.5,
-      confidence: calculateConfidence(player.gamesPlayed),
+      confidence: calculateConfidence(player.gamesPlayed, player.pointsPerGame, player.recentPointsPerGame, pointPred.probability),
       isValueBet: false,
       breakdown: pointPred.breakdown,
     });
@@ -533,7 +572,7 @@ export function generateGamePredictions(
       expectedValue: goalPred.expectedGoals,
       probability: goalPred.probability,
       line: 0.5,
-      confidence: calculateConfidence(player.gamesPlayed),
+      confidence: calculateConfidence(player.gamesPlayed, player.goalsPerGame, player.recentGoalsPerGame, goalPred.probability),
       isValueBet: false,
       breakdown: goalPred.breakdown,
     });
@@ -552,7 +591,7 @@ export function generateGamePredictions(
       expectedValue: shotPred.expectedShots,
       probability: shotPred.probability,
       line: 2.5,
-      confidence: calculateConfidence(player.gamesPlayed),
+      confidence: calculateConfidence(player.gamesPlayed, player.shotsPerGame, player.recentShotsPerGame, shotPred.probability),
       isValueBet: false,
       breakdown: shotPred.breakdown,
     });
@@ -571,7 +610,7 @@ export function generateGamePredictions(
       expectedValue: pointPred.expectedPoints,
       probability: pointPred.probability,
       line: 0.5,
-      confidence: calculateConfidence(player.gamesPlayed),
+      confidence: calculateConfidence(player.gamesPlayed, player.pointsPerGame, player.recentPointsPerGame, pointPred.probability),
       isValueBet: false,
       breakdown: pointPred.breakdown,
     });
