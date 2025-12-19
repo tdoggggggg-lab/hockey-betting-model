@@ -61,8 +61,12 @@ export async function GET(request: Request) {
     const now = Date.now();
     const useCache = (now - cacheTimestamp) < CACHE_DURATION && playerStatsCache.size > 0;
     
-    // Process each game
-    for (const game of todaySchedule.games) {
+    // Helper function to add delay
+    const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    
+    // Process each game with rate limiting
+    for (let i = 0; i < todaySchedule.games.length; i++) {
+      const game = todaySchedule.games[i];
       try {
         const homeAbbrev = game.homeTeam?.abbrev;
         const awayAbbrev = game.awayTeam?.abbrev;
@@ -74,20 +78,34 @@ export async function GET(request: Request) {
           continue;
         }
         
-        console.log(`Processing game: ${awayAbbrev} @ ${homeAbbrev}`);
+        console.log(`Processing game ${i + 1}/${todaySchedule.games.length}: ${awayAbbrev} @ ${homeAbbrev}`);
         
         // Get player stats (from cache or fresh)
         let homePlayers = useCache ? playerStatsCache.get(homeAbbrev) : null;
         let awayPlayers = useCache ? playerStatsCache.get(awayAbbrev) : null;
         
         if (!homePlayers) {
-          homePlayers = await getPlayersForTeam(homeAbbrev);
-          playerStatsCache.set(homeAbbrev, homePlayers);
+          try {
+            homePlayers = await getPlayersForTeam(homeAbbrev);
+            playerStatsCache.set(homeAbbrev, homePlayers);
+            // Add delay to avoid rate limiting
+            await delay(500);
+          } catch (err) {
+            console.error(`Failed to fetch ${homeAbbrev} roster:`, err);
+            homePlayers = [];
+          }
         }
         
         if (!awayPlayers) {
-          awayPlayers = await getPlayersForTeam(awayAbbrev);
-          playerStatsCache.set(awayAbbrev, awayPlayers);
+          try {
+            awayPlayers = await getPlayersForTeam(awayAbbrev);
+            playerStatsCache.set(awayAbbrev, awayPlayers);
+            // Add delay to avoid rate limiting
+            await delay(500);
+          } catch (err) {
+            console.error(`Failed to fetch ${awayAbbrev} roster:`, err);
+            awayPlayers = [];
+          }
         }
         
         if (!useCache) {
