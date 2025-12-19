@@ -69,23 +69,48 @@ export interface TeamStats {
  * Fetch roster for a team to get player IDs
  */
 export async function getTeamRoster(teamAbbrev: string): Promise<any[]> {
-  try {
-    const response = await fetch(`${NHL_API_BASE}/roster/${teamAbbrev}/current`);
-    if (!response.ok) throw new Error(`Failed to fetch roster: ${response.status}`);
-    
-    const data = await response.json();
-    const players: any[] = [];
-    
-    // Combine forwards, defensemen, goalies
-    if (data.forwards) players.push(...data.forwards);
-    if (data.defensemen) players.push(...data.defensemen);
-    if (data.goalies) players.push(...data.goalies);
-    
-    return players;
-  } catch (error) {
-    console.error(`Error fetching roster for ${teamAbbrev}:`, error);
-    return [];
+  const maxRetries = 3;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(`${NHL_API_BASE}/roster/${teamAbbrev}/current`, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'HockeyEdge/1.0',
+        },
+      });
+      
+      if (response.status === 429) {
+        // Rate limited - wait and retry
+        console.log(`Rate limited for ${teamAbbrev}, waiting before retry ${attempt}/${maxRetries}...`);
+        await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+        continue;
+      }
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch roster: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const players: any[] = [];
+      
+      // Combine forwards, defensemen, goalies
+      if (data.forwards) players.push(...data.forwards);
+      if (data.defensemen) players.push(...data.defensemen);
+      if (data.goalies) players.push(...data.goalies);
+      
+      return players;
+    } catch (error) {
+      if (attempt === maxRetries) {
+        console.error(`Error fetching roster for ${teamAbbrev} after ${maxRetries} attempts:`, error);
+        return [];
+      }
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
   }
+  
+  return [];
 }
 
 /**
@@ -198,14 +223,22 @@ export async function getPlayersForTeam(teamAbbrev: string): Promise<PlayerStats
     // Filter to only skaters (not goalies) and fetch their stats
     const skaters = roster.filter(p => p.positionCode !== 'G');
     
-    // Fetch game logs in parallel (limit to avoid rate limiting)
-    const batchSize = 5;
+    // Helper function to add delay
+    const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    
+    // Fetch game logs with smaller batches and delays to avoid rate limiting
+    const batchSize = 3; // Reduced from 5
     for (let i = 0; i < skaters.length; i += batchSize) {
       const batch = skaters.slice(i, i + batchSize);
       const results = await Promise.all(
         batch.map(async (player) => {
-          const gameLog = await getPlayerGameLog(player.id);
-          return calculatePlayerStats(player.id, player, gameLog, teamAbbrev);
+          try {
+            const gameLog = await getPlayerGameLog(player.id);
+            return calculatePlayerStats(player.id, player, gameLog, teamAbbrev);
+          } catch (err) {
+            console.error(`Error fetching game log for ${player.id}:`, err);
+            return null;
+          }
         })
       );
       
@@ -214,6 +247,11 @@ export async function getPlayersForTeam(teamAbbrev: string): Promise<PlayerStats
           players.push(stats);
         }
       });
+      
+      // Add delay between batches to avoid rate limiting
+      if (i + batchSize < skaters.length) {
+        await delay(200);
+      }
     }
     
     return players;
