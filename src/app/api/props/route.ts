@@ -197,36 +197,31 @@ export async function GET(request: Request) {
 }
 
 /**
- * Identify value bets by comparing predictions to estimated fair odds
+ * Identify top picks - best predictions based on probability AND confidence
+ * (Until we have real sportsbook odds for true value bet detection)
  */
 function identifyValueBetsFromPredictions(predictions: PropPrediction[]): PropPrediction[] {
-  const valueBets: PropPrediction[] = [];
+  // Score each prediction based on probability AND confidence
+  const scoredPredictions = predictions
+    .filter(pred => pred.probability >= 0.20) // Only consider players with 20%+ chance
+    .map(pred => ({
+      ...pred,
+      // Combined score: 60% probability weight, 40% confidence weight
+      pickScore: (pred.probability * 0.6) + (pred.confidence * 0.4)
+    }))
+    .sort((a, b) => b.pickScore - a.pickScore);
   
-  predictions.forEach(pred => {
-    // Estimate what the sportsbook line might be
-    const estimatedBookProb = pred.probability * 0.9;
-    const estimatedBookOdds = probToAmericanOdds(estimatedBookProb + 0.05);
-    
-    // Check if there's value
-    const valueCheck = identifyValueBet(pred.probability, estimatedBookOdds, 0.03);
-    
-    // Only flag as value if probability is in reasonable range
-    if (valueCheck.isValue && pred.probability >= 0.15 && pred.probability <= 0.60) {
-      valueBets.push({
-        ...pred,
-        isValueBet: true,
-        edge: valueCheck.edge,
-        impliedProbability: valueCheck.impliedProb,
-        bookmakerOdds: estimatedBookOdds,
-        bookmaker: 'Model Estimate',
-      });
-    }
-  });
+  // Take top picks and mark them as "value bets" for display
+  const topPicks = scoredPredictions.slice(0, 10).map(pred => ({
+    ...pred,
+    isValueBet: true,
+    edge: pred.pickScore, // Use the combined score as "edge" for display
+    impliedProbability: pred.probability * 0.95, // Slight discount for display
+    bookmakerOdds: probToAmericanOdds(pred.probability),
+    bookmaker: 'Model Pick',
+  }));
   
-  // Sort by edge (highest first)
-  valueBets.sort((a, b) => (b.edge || 0) - (a.edge || 0));
-  
-  return valueBets;
+  return topPicks;
 }
 
 /**
