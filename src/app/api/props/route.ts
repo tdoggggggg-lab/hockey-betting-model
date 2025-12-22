@@ -61,60 +61,43 @@ export async function GET(request: Request) {
     const now = Date.now();
     const useCache = (now - cacheTimestamp) < CACHE_DURATION && playerStatsCache.size > 0;
     
-    // Helper function to add delay
-    const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-    
-    // Process each game with rate limiting
-    for (let i = 0; i < todaySchedule.games.length; i++) {
-      const game = todaySchedule.games[i];
+    // Process all games in parallel for speed
+    const gamePromises = todaySchedule.games.map(async (game, i) => {
       try {
         const homeAbbrev = game.homeTeam?.abbrev;
         const awayAbbrev = game.awayTeam?.abbrev;
         
-        if (!homeAbbrev || !awayAbbrev) continue;
+        if (!homeAbbrev || !awayAbbrev) return { predictions: [], players: 0 };
         
         // Apply team filter if specified
         if (teamFilter && teamFilter !== homeAbbrev && teamFilter !== awayAbbrev) {
-          continue;
+          return { predictions: [], players: 0 };
         }
         
         console.log(`Processing game ${i + 1}/${todaySchedule.games.length}: ${awayAbbrev} @ ${homeAbbrev}`);
         
-        // Get player stats (from cache or fresh)
+        // Get player stats (from cache or fresh) - now in parallel
         let homePlayers = useCache ? playerStatsCache.get(homeAbbrev) : null;
         let awayPlayers = useCache ? playerStatsCache.get(awayAbbrev) : null;
         
-        if (!homePlayers) {
-          try {
-            homePlayers = await getPlayersForTeam(homeAbbrev);
-            playerStatsCache.set(homeAbbrev, homePlayers);
-            // Add delay to avoid rate limiting
-            await delay(500);
-          } catch (err) {
-            console.error(`Failed to fetch ${homeAbbrev} roster:`, err);
-            homePlayers = [];
-          }
-        }
+        // Fetch both teams in parallel if not cached
+        const [homeResult, awayResult] = await Promise.all([
+          homePlayers ? Promise.resolve(homePlayers) : getPlayersForTeam(homeAbbrev),
+          awayPlayers ? Promise.resolve(awayPlayers) : getPlayersForTeam(awayAbbrev),
+        ]);
         
-        if (!awayPlayers) {
-          try {
-            awayPlayers = await getPlayersForTeam(awayAbbrev);
-            playerStatsCache.set(awayAbbrev, awayPlayers);
-            // Add delay to avoid rate limiting
-            await delay(500);
-          } catch (err) {
-            console.error(`Failed to fetch ${awayAbbrev} roster:`, err);
-            awayPlayers = [];
-          }
-        }
+        homePlayers = homeResult;
+        awayPlayers = awayResult;
         
+        // Update cache
         if (!useCache) {
-          cacheTimestamp = now;
+          playerStatsCache.set(homeAbbrev, homePlayers);
+          playerStatsCache.set(awayAbbrev, awayPlayers);
         }
         
-        totalPlayers += (homePlayers?.length || 0) + (awayPlayers?.length || 0);
+        const playerCount = (homePlayers?.length || 0) + (awayPlayers?.length || 0);
         
-        // Get team stats and situational factors
+        // Get team stats and situational factors in parallel
         const [homeTeamStats, awayTeamStats, homeB2B, awayB2B] = await Promise.all([
           getTeamStats(homeAbbrev),
           getTeamStats(awayAbbrev),
@@ -155,11 +138,26 @@ export async function GET(request: Request) {
           awayTeamStats || undefined
         );
         
-        allPredictions.push(...gamePredictions);
+        return { predictions: gamePredictions, players: playerCount };
         
       } catch (gameError) {
         console.error(`Error processing game:`, gameError);
+        return { predictions: [], players: 0 };
       }
+    });
+    
+    // Wait for all games to complete
+    const results = await Promise.all(gamePromises);
+    
+    // Combine results
+    results.forEach(result => {
+      allPredictions.push(...result.predictions);
+      totalPlayers += result.players;
+    });
+    
+    // Update cache timestamp
+    if (!useCache) {
+      cacheTimestamp = now;
     }
     
     // Filter by prop type
