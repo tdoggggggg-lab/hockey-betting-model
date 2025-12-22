@@ -211,17 +211,17 @@ export default function GoalscorerTable() {
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-emerald-400">{valueBets.length}</div>
-              <div className="text-slate-500">Value Bets</div>
+              <div className="text-slate-500">Top Picks</div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Value Bets Section */}
+      {/* Top Picks Section */}
       {valueBets.length > 0 && (
         <div className="mb-8">
           <h3 className="text-lg font-bold text-emerald-400 mb-4 flex items-center gap-2">
-            <span>🔥</span> Top Value Bets
+            <span>🎯</span> Top Picks (Highest Probability + Confidence)
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {valueBets.slice(0, 6).map((pred, index) => (
@@ -244,19 +244,19 @@ export default function GoalscorerTable() {
                   </div>
                   <div className="text-right">
                     <div className="text-emerald-400 font-bold text-lg">
-                      +{((pred.edge || 0) * 100).toFixed(1)}%
+                      #{index + 1}
                     </div>
-                    <div className="text-slate-500 text-xs">edge</div>
+                    <div className="text-slate-500 text-xs">rank</div>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-sm">
                   <div className="bg-slate-900/50 rounded-lg p-2">
-                    <div className="text-slate-500 text-xs">Model Prob</div>
+                    <div className="text-slate-500 text-xs">Probability</div>
                     <div className="text-white font-semibold">{formatProbability(pred.probability)}</div>
                   </div>
                   <div className="bg-slate-900/50 rounded-lg p-2">
-                    <div className="text-slate-500 text-xs">Book Implied</div>
-                    <div className="text-white font-semibold">{formatProbability(pred.impliedProbability || 0)}</div>
+                    <div className="text-slate-500 text-xs">Confidence</div>
+                    <div className="text-white font-semibold">{(pred.confidence * 100).toFixed(0)}%</div>
                   </div>
                 </div>
               </div>
@@ -299,7 +299,7 @@ export default function GoalscorerTable() {
               onChange={(e) => setShowValueOnly(e.target.checked)}
               className="rounded border-slate-600 bg-slate-800 text-emerald-500 focus:ring-emerald-500"
             />
-            Value bets only
+            Top picks only
           </label>
         </div>
         
@@ -417,7 +417,7 @@ export default function GoalscorerTable() {
                   <td className="py-3 px-2 text-center">
                     {pred.isValueBet ? (
                       <span className="inline-flex items-center gap-1 px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded-full text-xs font-medium">
-                        🔥 Value
+                        🎯 Top Pick
                       </span>
                     ) : (
                       <span className="text-slate-600 text-xs">-</span>
@@ -435,7 +435,7 @@ export default function GoalscorerTable() {
           <div className="text-4xl mb-4">🏒</div>
           <h3 className="text-lg font-medium text-slate-400">No predictions available</h3>
           <p className="text-slate-500 text-sm mt-2">
-            {showValueOnly ? 'No value bets found. Try showing all predictions.' : 'Check back closer to game time'}
+            {showValueOnly ? 'No top picks found. Try showing all predictions.' : 'Check back closer to game time'}
           </p>
         </div>
       )}
