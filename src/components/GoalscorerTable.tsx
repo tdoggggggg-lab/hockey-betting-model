@@ -65,7 +65,7 @@ export default function GoalscorerTable() {
   const [propsData, setPropsData] = useState<PropsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<'probability' | 'confidence' | 'name'>('probability');
+  const [sortBy, setSortBy] = useState<'probability' | 'confidence'>('probability');
   const [selectedGame, setSelectedGame] = useState<string>('all');
   const [showValueOnly, setShowValueOnly] = useState(false);
 
@@ -128,9 +128,18 @@ export default function GoalscorerTable() {
   const predictions = propsData?.predictions || [];
   const valueBets = propsData?.valueBets || [];
   
+  // Create a set of top pick player IDs for quick lookup
+  const topPickPlayerIds = new Set(valueBets.map(v => v.playerId));
+  
+  // Mark predictions that are top picks
+  const markedPredictions = predictions.map(p => ({
+    ...p,
+    isValueBet: topPickPlayerIds.has(p.playerId)
+  }));
+  
   // Extract unique games from predictions
   const gamesMap = new Map<string, GameInfo>();
-  predictions.forEach(p => {
+  markedPredictions.forEach(p => {
     // Create a unique game ID based on the two teams
     const awayTeam = p.isHome ? p.opponentAbbrev : p.teamAbbrev;
     const homeTeam = p.isHome ? p.teamAbbrev : p.opponentAbbrev;
@@ -154,12 +163,12 @@ export default function GoalscorerTable() {
   
   if (selectedGame === 'all') {
     // Show top 10 across all games
-    filteredPredictions = [...predictions].sort((a, b) => b.probability - a.probability).slice(0, 10);
+    filteredPredictions = [...markedPredictions].sort((a, b) => b.probability - a.probability).slice(0, 10);
   } else {
     // Show all players from selected game
     const game = gamesMap.get(selectedGame);
     if (game) {
-      filteredPredictions = predictions.filter(p => 
+      filteredPredictions = markedPredictions.filter(p => 
         p.teamAbbrev === game.homeAbbrev || 
         p.teamAbbrev === game.awayAbbrev
       );
@@ -178,8 +187,6 @@ export default function GoalscorerTable() {
     filteredPredictions = [...filteredPredictions].sort((a, b) => b.probability - a.probability);
   } else if (sortBy === 'confidence') {
     filteredPredictions = [...filteredPredictions].sort((a, b) => b.confidence - a.confidence);
-  } else {
-    filteredPredictions = [...filteredPredictions].sort((a, b) => a.playerName.localeCompare(b.playerName));
   }
 
   const formatProbability = (prob: number) => `${(prob * 100).toFixed(1)}%`;
@@ -289,7 +296,6 @@ export default function GoalscorerTable() {
           >
             <option value="probability">Sort by Probability</option>
             <option value="confidence">Sort by Confidence</option>
-            <option value="name">Sort by Name</option>
           </select>
           
           <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer">
