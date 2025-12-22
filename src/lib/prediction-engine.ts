@@ -394,7 +394,10 @@ export function predictSaves(
 
 /**
  * Calculate confidence score based on prediction certainty
- * Factors: sample size, scoring consistency, matchup clarity
+ * 
+ * HIGH confidence = Player is scoring AND consistent (or on a hot streak)
+ * MEDIUM confidence = Decent scorer with some variance
+ * LOW confidence = Rarely scores OR very inconsistent
  */
 export function calculateConfidence(
   gamesPlayed: number,
@@ -404,40 +407,52 @@ export function calculateConfidence(
 ): number {
   let confidence = 0;
   
-  // Factor 1: Sample size (max 0.3)
+  // Factor 1: Sample size (max 0.25)
   if (gamesPlayed >= 30) {
-    confidence += 0.3;
-  } else if (gamesPlayed >= 20) {
     confidence += 0.25;
+  } else if (gamesPlayed >= 20) {
+    confidence += 0.20;
   } else if (gamesPlayed >= 10) {
-    confidence += 0.15;
+    confidence += 0.12;
   } else {
     confidence += 0.05;
   }
   
-  // Factor 2: Scoring consistency - how close is recent form to season average (max 0.35)
-  // If recent and season are similar, prediction is more reliable
-  const variance = Math.abs(goalsPerGame - recentGoalsPerGame);
-  if (variance < 0.05) {
-    confidence += 0.35; // Very consistent
-  } else if (variance < 0.15) {
-    confidence += 0.25; // Fairly consistent
-  } else if (variance < 0.25) {
-    confidence += 0.15; // Some variance
+  // Factor 2: Recent form vs season average (max 0.35)
+  // HOT STREAK: recent > season = BOOST confidence
+  // COLD STREAK: recent < season = LOWER confidence
+  // CONSISTENT: recent ≈ season = GOOD confidence
+  const formRatio = goalsPerGame > 0 ? recentGoalsPerGame / goalsPerGame : 0;
+  
+  if (formRatio >= 1.2) {
+    // Hot streak! Recent scoring is 20%+ above season average
+    confidence += 0.35;
+  } else if (formRatio >= 0.9) {
+    // Consistent - recent form matches season
+    confidence += 0.28;
+  } else if (formRatio >= 0.6) {
+    // Slightly cold
+    confidence += 0.15;
   } else {
-    confidence += 0.05; // High variance, less predictable
+    // Cold streak or barely scoring recently
+    confidence += 0.05;
   }
   
-  // Factor 3: Prediction clarity - extreme probabilities are more certain (max 0.35)
-  // Very high or very low probabilities are more reliable than middle ones
-  if (probability >= 0.45 || probability <= 0.10) {
-    confidence += 0.35; // Clear prediction
-  } else if (probability >= 0.35 || probability <= 0.15) {
-    confidence += 0.25; // Fairly clear
-  } else if (probability >= 0.25 || probability <= 0.20) {
-    confidence += 0.15; // Middle ground
+  // Factor 3: Actual scoring rate (max 0.40)
+  // Players who score more are more predictable
+  // But this is based on RECENT form, not just season average
+  const recentRate = recentGoalsPerGame;
+  
+  if (recentRate >= 0.40) {
+    confidence += 0.40; // Scoring almost every other game recently
+  } else if (recentRate >= 0.25) {
+    confidence += 0.32; // Solid recent scoring
+  } else if (recentRate >= 0.15) {
+    confidence += 0.22; // Decent recent scoring
+  } else if (recentRate >= 0.08) {
+    confidence += 0.12; // Occasional scorer
   } else {
-    confidence += 0.10; // Uncertain range (20-25%)
+    confidence += 0.05; // Rarely scoring
   }
   
   return Math.min(confidence, 1.0); // Cap at 100%
