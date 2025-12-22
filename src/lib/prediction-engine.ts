@@ -393,69 +393,138 @@ export function predictSaves(
 }
 
 /**
- * Calculate confidence score based on prediction certainty
+ * Calculate confidence score - "Is this a good bet to make?"
  * 
- * HIGH confidence = Player is scoring AND consistent (or on a hot streak)
- * MEDIUM confidence = Decent scorer with some variance
- * LOW confidence = Rarely scores OR very inconsistent
+ * Factors:
+ * - Player quality (elite players are more predictable)
+ * - Recent form (hot/cold streak, but 4th liners regress)
+ * - Consistency (season-long reliability)
+ * - Power play time (PP1 = more chances)
+ * - Matchup factors passed in
+ * - Situational (home/away, B2B)
  */
 export function calculateConfidence(
   gamesPlayed: number,
   goalsPerGame: number,
   recentGoalsPerGame: number,
-  probability: number
+  probability: number,
+  ppTimePerGame: number = 0, // Power play seconds per game
+  isHome: boolean = true,
+  isBackToBack: boolean = false,
+  opponentGoalsAgainstPerGame: number = 3.0 // League average ~3.0
 ): number {
   let confidence = 0;
   
-  // Factor 1: Sample size (max 0.25)
-  if (gamesPlayed >= 30) {
-    confidence += 0.25;
-  } else if (gamesPlayed >= 20) {
-    confidence += 0.20;
-  } else if (gamesPlayed >= 10) {
-    confidence += 0.12;
+  // ============================================
+  // FACTOR 1: Player Quality / Role (25%)
+  // Elite players are more reliable bets
+  // ============================================
+  const seasonGoalRate = goalsPerGame;
+  
+  if (seasonGoalRate >= 0.45) {
+    confidence += 0.25; // Elite scorer (McDavid, Matthews tier)
+  } else if (seasonGoalRate >= 0.30) {
+    confidence += 0.22; // Star player (1st line)
+  } else if (seasonGoalRate >= 0.20) {
+    confidence += 0.17; // Good scorer (2nd line)
+  } else if (seasonGoalRate >= 0.12) {
+    confidence += 0.10; // Depth scorer (3rd line)
   } else {
-    confidence += 0.05;
+    confidence += 0.03; // 4th liner / defenseman - hard to predict
   }
   
-  // Factor 2: Recent form vs season average (max 0.35)
-  // HOT STREAK: recent > season = BOOST confidence
-  // COLD STREAK: recent < season = LOWER confidence
-  // CONSISTENT: recent ≈ season = GOOD confidence
-  const formRatio = goalsPerGame > 0 ? recentGoalsPerGame / goalsPerGame : 0;
+  // ============================================
+  // FACTOR 2: Recent Form (20%)
+  // Hot streaks matter, but penalize 4th liners (regression)
+  // ============================================
+  const formRatio = seasonGoalRate > 0 ? recentGoalsPerGame / seasonGoalRate : 0;
+  const isDepthPlayer = seasonGoalRate < 0.15;
   
-  if (formRatio >= 1.2) {
-    // Hot streak! Recent scoring is 20%+ above season average
-    confidence += 0.35;
+  if (formRatio >= 1.3) {
+    // Player is HOT (30%+ above season average)
+    if (isDepthPlayer) {
+      // 4th liner on hot streak = likely to regress
+      confidence += 0.08;
+    } else {
+      // Star player on hot streak = ride the wave
+      confidence += 0.20;
+    }
   } else if (formRatio >= 0.9) {
-    // Consistent - recent form matches season
-    confidence += 0.28;
-  } else if (formRatio >= 0.6) {
-    // Slightly cold
+    // Consistent with season average
     confidence += 0.15;
+  } else if (formRatio >= 0.5) {
+    // Slightly cold
+    confidence += 0.08;
   } else {
-    // Cold streak or barely scoring recently
-    confidence += 0.05;
+    // Very cold or not scoring
+    confidence += 0.02;
   }
   
-  // Factor 3: Actual scoring rate (max 0.40)
-  // Players who score more are more predictable
-  // But this is based on RECENT form, not just season average
-  const recentRate = recentGoalsPerGame;
-  
-  if (recentRate >= 0.40) {
-    confidence += 0.40; // Scoring almost every other game recently
-  } else if (recentRate >= 0.25) {
-    confidence += 0.32; // Solid recent scoring
-  } else if (recentRate >= 0.15) {
-    confidence += 0.22; // Decent recent scoring
-  } else if (recentRate >= 0.08) {
-    confidence += 0.12; // Occasional scorer
+  // ============================================
+  // FACTOR 3: Season Consistency (15%)
+  // Players who score regularly vs randomly
+  // ============================================
+  // Use sample size as proxy for consistency data
+  if (gamesPlayed >= 40 && seasonGoalRate >= 0.20) {
+    confidence += 0.15; // Large sample + decent scorer = consistent
+  } else if (gamesPlayed >= 25 && seasonGoalRate >= 0.15) {
+    confidence += 0.12;
+  } else if (gamesPlayed >= 15) {
+    confidence += 0.08;
   } else {
-    confidence += 0.05; // Rarely scoring
+    confidence += 0.03; // Small sample = less reliable
   }
   
-  return Math.min(confidence, 1.0); // Cap at 100%
+  // ============================================
+  // FACTOR 4: Power Play Time (15%)
+  // PP1 players get way more scoring chances
+  // ============================================
+  const ppMinutesPerGame = ppTimePerGame / 60;
+  
+  if (ppMinutesPerGame >= 3.5) {
+    confidence += 0.15; // PP1 quarterback - lots of chances
+  } else if (ppMinutesPerGame >= 2.0) {
+    confidence += 0.12; // PP1 player
+  } else if (ppMinutesPerGame >= 1.0) {
+    confidence += 0.07; // PP2 or limited PP time
+  } else {
+    confidence += 0.02; // No PP time - fewer chances
+  }
+  
+  // ============================================
+  // FACTOR 5: Matchup (15%)
+  // Facing weak defense/goalie = better chance
+  // ============================================
+  if (opponentGoalsAgainstPerGame >= 3.5) {
+    confidence += 0.15; // Weak defense - great matchup
+  } else if (opponentGoalsAgainstPerGame >= 3.2) {
+    confidence += 0.12; // Below average defense
+  } else if (opponentGoalsAgainstPerGame >= 2.8) {
+    confidence += 0.08; // Average defense
+  } else {
+    confidence += 0.03; // Strong defense - tough matchup
+  }
+  
+  // ============================================
+  // FACTOR 6: Situational (10%)
+  // Home ice advantage, back-to-back penalty
+  // ============================================
+  let situational = 0.05; // Base
+  
+  if (isHome) {
+    situational += 0.03; // Home boost
+  }
+  
+  if (isBackToBack) {
+    situational -= 0.04; // B2B penalty (tired legs)
+  }
+  
+  confidence += Math.max(situational, 0.01);
+  
+  // ============================================
+  // FINAL SCORE
+  // ============================================
+  return Math.min(Math.max(confidence, 0.05), 1.0);
 }
 
 /**
@@ -498,6 +567,9 @@ export function generateGamePredictions(
   
   // Generate predictions for home team players
   homePlayers.forEach(player => {
+    // Get opponent goals against for matchup factor
+    const opponentGA = awayTeamStats?.goalsAgainstPerGame || 3.0;
+    
     // Goalscorer prediction
     const goalPred = predictGoalscorer(
       player, 
@@ -519,7 +591,16 @@ export function generateGamePredictions(
       expectedValue: goalPred.expectedGoals,
       probability: goalPred.probability,
       line: 0.5,
-      confidence: calculateConfidence(player.gamesPlayed, player.goalsPerGame, player.recentGoalsPerGame, goalPred.probability),
+      confidence: calculateConfidence(
+        player.gamesPlayed, 
+        player.goalsPerGame, 
+        player.recentGoalsPerGame, 
+        goalPred.probability,
+        player.powerPlayTimeOnIce, // PP time
+        true, // isHome
+        homeBackToBack, // B2B
+        opponentGA // opponent defense quality
+      ),
       isValueBet: false,
       breakdown: goalPred.breakdown,
     });
@@ -539,7 +620,16 @@ export function generateGamePredictions(
       expectedValue: shotPred.expectedShots,
       probability: shotPred.probability,
       line: 2.5,
-      confidence: calculateConfidence(player.gamesPlayed, player.shotsPerGame, player.recentShotsPerGame, shotPred.probability),
+      confidence: calculateConfidence(
+        player.gamesPlayed, 
+        player.shotsPerGame, 
+        player.recentShotsPerGame, 
+        shotPred.probability,
+        player.powerPlayTimeOnIce,
+        true,
+        homeBackToBack,
+        opponentGA
+      ),
       isValueBet: false,
       breakdown: shotPred.breakdown,
     });
@@ -559,7 +649,16 @@ export function generateGamePredictions(
       expectedValue: pointPred.expectedPoints,
       probability: pointPred.probability,
       line: 0.5,
-      confidence: calculateConfidence(player.gamesPlayed, player.pointsPerGame, player.recentPointsPerGame, pointPred.probability),
+      confidence: calculateConfidence(
+        player.gamesPlayed, 
+        player.pointsPerGame, 
+        player.recentPointsPerGame, 
+        pointPred.probability,
+        player.powerPlayTimeOnIce,
+        true,
+        homeBackToBack,
+        opponentGA
+      ),
       isValueBet: false,
       breakdown: pointPred.breakdown,
     });
@@ -567,6 +666,9 @@ export function generateGamePredictions(
   
   // Generate predictions for away team players
   awayPlayers.forEach(player => {
+    // Get opponent goals against for matchup factor
+    const opponentGA = homeTeamStats?.goalsAgainstPerGame || 3.0;
+    
     const goalPred = predictGoalscorer(
       player, 
       false, 
@@ -587,7 +689,16 @@ export function generateGamePredictions(
       expectedValue: goalPred.expectedGoals,
       probability: goalPred.probability,
       line: 0.5,
-      confidence: calculateConfidence(player.gamesPlayed, player.goalsPerGame, player.recentGoalsPerGame, goalPred.probability),
+      confidence: calculateConfidence(
+        player.gamesPlayed, 
+        player.goalsPerGame, 
+        player.recentGoalsPerGame, 
+        goalPred.probability,
+        player.powerPlayTimeOnIce,
+        false, // away
+        awayBackToBack,
+        opponentGA
+      ),
       isValueBet: false,
       breakdown: goalPred.breakdown,
     });
@@ -606,7 +717,16 @@ export function generateGamePredictions(
       expectedValue: shotPred.expectedShots,
       probability: shotPred.probability,
       line: 2.5,
-      confidence: calculateConfidence(player.gamesPlayed, player.shotsPerGame, player.recentShotsPerGame, shotPred.probability),
+      confidence: calculateConfidence(
+        player.gamesPlayed, 
+        player.shotsPerGame, 
+        player.recentShotsPerGame, 
+        shotPred.probability,
+        player.powerPlayTimeOnIce,
+        false,
+        awayBackToBack,
+        opponentGA
+      ),
       isValueBet: false,
       breakdown: shotPred.breakdown,
     });
@@ -625,7 +745,16 @@ export function generateGamePredictions(
       expectedValue: pointPred.expectedPoints,
       probability: pointPred.probability,
       line: 0.5,
-      confidence: calculateConfidence(player.gamesPlayed, player.pointsPerGame, player.recentPointsPerGame, pointPred.probability),
+      confidence: calculateConfidence(
+        player.gamesPlayed, 
+        player.pointsPerGame, 
+        player.recentPointsPerGame, 
+        pointPred.probability,
+        player.powerPlayTimeOnIce,
+        false,
+        awayBackToBack,
+        opponentGA
+      ),
       isValueBet: false,
       breakdown: pointPred.breakdown,
     });
