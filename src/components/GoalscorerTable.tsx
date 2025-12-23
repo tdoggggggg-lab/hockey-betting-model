@@ -191,6 +191,20 @@ export default function GoalscorerTable() {
 
   const formatProbability = (prob: number) => `${(prob * 100).toFixed(1)}%`;
   
+  // Convert probability to American odds format
+  const formatOdds = (prob: number) => {
+    if (prob <= 0 || prob >= 1) return '-';
+    if (prob >= 0.5) {
+      // Favorite: negative odds
+      const odds = Math.round((-100 * prob) / (1 - prob));
+      return odds.toString();
+    } else {
+      // Underdog: positive odds
+      const odds = Math.round((100 * (1 - prob)) / prob);
+      return `+${odds}`;
+    }
+  };
+  
   // Format confidence as visual indicator
   const formatConfidence = (conf: number) => {
     if (conf >= 0.75) return { dots: '●●●', color: 'text-emerald-400', label: 'High' };
@@ -352,6 +366,7 @@ export default function GoalscorerTable() {
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Time</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Exp. Goals</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Probability</th>
+              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Model Odds</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Confidence</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Status</th>
             </tr>
@@ -411,6 +426,15 @@ export default function GoalscorerTable() {
                         {formatProbability(pred.probability)}
                       </span>
                     </div>
+                  </td>
+                  <td className="py-3 px-2 text-center">
+                    <span className={`font-mono text-sm ${
+                      pred.probability >= 0.4 ? 'text-emerald-400' :
+                      pred.probability >= 0.25 ? 'text-amber-400' :
+                      'text-slate-400'
+                    }`}>
+                      {formatOdds(pred.probability)}
+                    </span>
                   </td>
                   <td className="py-3 px-2 text-center">
                     <div className="flex flex-col items-center">
