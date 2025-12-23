@@ -11,6 +11,10 @@ import {
   PropPrediction,
 } from '@/lib/prediction-engine';
 import { getWeekSchedule } from '@/lib/nhl-api';
+import {
+  getInjuryAdjustmentsAsync,
+  InjuryAdjustments,
+} from '@/lib/injury-service';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Allow up to 60 seconds for this endpoint
@@ -57,6 +61,17 @@ export async function GET(request: Request) {
     const allPredictions: PropPrediction[] = [];
     let totalPlayers = 0;
     
+    // Collect all team abbreviations for injury lookup
+    const teamAbbrevs: string[] = [];
+    todaySchedule.games.forEach(game => {
+      if (game.homeTeam?.abbrev) teamAbbrevs.push(game.homeTeam.abbrev);
+      if (game.awayTeam?.abbrev) teamAbbrevs.push(game.awayTeam.abbrev);
+    });
+    
+    // Get injury adjustments (auto-fetches from multiple sources)
+    const injuryData = await getInjuryAdjustmentsAsync(teamAbbrevs);
+    console.log(`Loaded injury data for ${injuryData.injuries.size} teams`);
+    
     // Check if cache is still valid
     const now = Date.now();
     const useCache = (now - cacheTimestamp) < CACHE_DURATION && playerStatsCache.size > 0;
@@ -89,13 +104,29 @@ export async function GET(request: Request) {
         homePlayers = homeResult;
         awayPlayers = awayResult;
         
+        // FILTER OUT INJURED PLAYERS
+        const healthyHomePlayers = homePlayers?.filter(player => 
+          !injuryData.isPlayerOut(player.name, homeAbbrev)
+        ) || [];
+        
+        const healthyAwayPlayers = awayPlayers?.filter(player =>
+          !injuryData.isPlayerOut(player.name, awayAbbrev)
+        ) || [];
+        
+        const injuredHomeCount = (homePlayers?.length || 0) - healthyHomePlayers.length;
+        const injuredAwayCount = (awayPlayers?.length || 0) - healthyAwayPlayers.length;
+        
+        if (injuredHomeCount > 0 || injuredAwayCount > 0) {
+          console.log(`Filtered out ${injuredHomeCount} injured ${homeAbbrev} players, ${injuredAwayCount} injured ${awayAbbrev} players`);
+        }
+        
         // Update cache
         if (!useCache) {
           playerStatsCache.set(homeAbbrev, homePlayers);
           playerStatsCache.set(awayAbbrev, awayPlayers);
         }
         
-        const playerCount = (homePlayers?.length || 0) + (awayPlayers?.length || 0);
+        const playerCount = healthyHomePlayers.length + healthyAwayPlayers.length;
         
         // Get team stats and situational factors in parallel
         const [homeTeamStats, awayTeamStats, homeB2B, awayB2B] = await Promise.all([
@@ -105,14 +136,18 @@ export async function GET(request: Request) {
           isBackToBack(awayAbbrev),
         ]);
         
-        // Format game time
-        const gameTime = game.startTimeUTC 
-          ? new Date(game.startTimeUTC).toLocaleTimeString('en-US', { 
-              hour: 'numeric', 
-              minute: '2-digit',
-              hour12: true 
-            })
-          : 'TBD';
+        // Format game time - Convert UTC to Eastern Time properly
+        let gameTime = 'TBD';
+        if (game.startTimeUTC) {
+          const utcDate = new Date(game.startTimeUTC);
+          // Convert to Eastern Time
+          gameTime = utcDate.toLocaleTimeString('en-US', { 
+            hour: 'numeric', 
+            minute: '2-digit',
+            hour12: true,
+            timeZone: 'America/New_York'
+          });
+        }
         
         // Get team names
         const getTeamName = (team: any) => {
@@ -125,10 +160,10 @@ export async function GET(request: Request) {
           return team.abbrev || 'Unknown';
         };
         
-        // Generate predictions for this game
+        // Generate predictions for this game (using healthy players only)
         const gamePredictions = generateGamePredictions(
-          homePlayers || [],
-          awayPlayers || [],
+          healthyHomePlayers,
+          healthyAwayPlayers,
           { abbrev: homeAbbrev, name: getTeamName(game.homeTeam) },
           { abbrev: awayAbbrev, name: getTeamName(game.awayTeam) },
           gameTime,
@@ -138,7 +173,27 @@ export async function GET(request: Request) {
           awayTeamStats || undefined
         );
         
-        return { predictions: gamePredictions, players: playerCount };
+        // Apply injury adjustments to predictions
+        const adjustedPredictions = gamePredictions.map(pred => {
+          const adjustment = injuryData.getPlayerAdjustment(
+            pred.playerName,
+            pred.teamAbbrev,
+            pred.isHome,
+            pred.isHome ? homeB2B : awayB2B
+          );
+          
+          // Apply adjustment to probability
+          const adjustedProbability = Math.min(pred.probability * adjustment, 0.95);
+          
+          return {
+            ...pred,
+            probability: adjustedProbability,
+            // Recalculate confidence based on injury situation
+            confidence: pred.confidence * (adjustment >= 1 ? 1 : 0.9), // Lower confidence if team weakened
+          };
+        });
+        
+        return { predictions: adjustedPredictions, players: playerCount };
         
       } catch (gameError) {
         console.error(`Error processing game:`, gameError);
@@ -172,7 +227,7 @@ export async function GET(request: Request) {
     console.log(`Generated ${filteredPredictions.length} predictions, ${valueBets.length} value bets`);
     
     return NextResponse.json({
-      predictions: filteredPredictions.slice(0, 50), // Top 50 predictions
+      predictions: filteredPredictions, // Return ALL predictions (UI will filter by game)
       valueBets: valueBets.slice(0, 10), // Top 10 value bets
       lastUpdated: new Date().toISOString(),
       gamesAnalyzed: todaySchedule.games.length,
