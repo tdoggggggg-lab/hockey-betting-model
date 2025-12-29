@@ -65,100 +65,79 @@ export default function GoalscorerTable() {
   const [propsData, setPropsData] = useState<PropsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<'probability' | 'confidence'>('probability');
   const [selectedGame, setSelectedGame] = useState<string>('all');
+  const [sortBy, setSortBy] = useState<'probability' | 'confidence'>('probability');
   const [showValueOnly, setShowValueOnly] = useState(false);
 
   useEffect(() => {
-    async function fetchProps() {
+    const fetchProps = async () => {
       try {
         setLoading(true);
         const response = await fetch('/api/props?type=goalscorer');
-        
-        if (!response.ok) {
-          throw new Error('Failed to fetch props');
-        }
-        
+        if (!response.ok) throw new Error('Failed to fetch props');
         const data = await response.json();
         setPropsData(data);
-        
-        if (data.error) {
-          console.warn('Props API warning:', data.error);
-        }
       } catch (err) {
-        console.error('Error fetching props:', err);
-        setError('Failed to load predictions. Please try again.');
+        setError(err instanceof Error ? err.message : 'Failed to load predictions');
       } finally {
         setLoading(false);
       }
-    }
-    
+    };
+
     fetchProps();
-    
-    // Refresh every 5 minutes
     const interval = setInterval(fetchProps, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center py-20">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
-        <p className="text-slate-400">Analyzing players and generating predictions...</p>
-        <p className="text-slate-500 text-sm mt-2">This may take a moment for the first load</p>
+      <div className="flex items-center justify-center py-12">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+        <span className="ml-3 text-slate-400">Loading predictions...</span>
       </div>
     );
   }
 
-  if (error) {
+  if (error || !propsData) {
     return (
-      <div className="text-center py-20">
-        <div className="text-4xl mb-4">⚠️</div>
-        <h3 className="text-xl font-medium text-red-400">{error}</h3>
-        <button
-          onClick={() => window.location.reload()}
-          className="mt-4 px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-500"
-        >
-          Try Again
-        </button>
+      <div className="text-center py-12">
+        <div className="text-red-400 mb-2">Error loading predictions</div>
+        <div className="text-slate-500 text-sm">{error}</div>
       </div>
     );
   }
 
-  const predictions = propsData?.predictions || [];
-  const valueBets = propsData?.valueBets || [];
-  
-  // Create a set of top pick player IDs for quick lookup
-  const topPickPlayerIds = new Set(valueBets.map(v => v.playerId));
-  
-  // Mark predictions that are top picks
-  const markedPredictions = predictions.map(p => ({
-    ...p,
-    isValueBet: topPickPlayerIds.has(p.playerId)
-  }));
-  
   // Extract unique games from predictions
   const gamesMap = new Map<string, GameInfo>();
-  markedPredictions.forEach(p => {
-    // Create a unique game ID based on the two teams
-    const awayTeam = p.isHome ? p.opponentAbbrev : p.teamAbbrev;
-    const homeTeam = p.isHome ? p.teamAbbrev : p.opponentAbbrev;
-    const gameId = `${awayTeam}@${homeTeam}`;
+  propsData.predictions.forEach(pred => {
+    const gameId = `${pred.opponentAbbrev}-${pred.teamAbbrev}`;
+    const reverseId = `${pred.teamAbbrev}-${pred.opponentAbbrev}`;
     
-    if (!gamesMap.has(gameId)) {
-      gamesMap.set(gameId, {
-        id: gameId,
-        label: `${awayTeam} @ ${homeTeam} (${p.gameTime})`,
-        awayAbbrev: awayTeam,
-        homeAbbrev: homeTeam,
-        gameTime: p.gameTime,
+    if (!gamesMap.has(gameId) && !gamesMap.has(reverseId)) {
+      const awayAbbrev = pred.isHome ? pred.opponentAbbrev : pred.teamAbbrev;
+      const homeAbbrev = pred.isHome ? pred.teamAbbrev : pred.opponentAbbrev;
+      gamesMap.set(`${awayAbbrev}-${homeAbbrev}`, {
+        id: `${awayAbbrev}-${homeAbbrev}`,
+        label: `${awayAbbrev} @ ${homeAbbrev}`,
+        awayAbbrev,
+        homeAbbrev,
+        gameTime: pred.gameTime,
       });
     }
   });
-  
+
   const games = Array.from(gamesMap.values());
+
+  // Get value bet player IDs for marking
+  const valueBetIds = new Set(propsData.valueBets.map(vb => vb.playerId));
   
-  // Filter predictions based on selected game
+  // Mark predictions that are value bets
+  const markedPredictions = propsData.predictions.map(pred => ({
+    ...pred,
+    isValueBet: valueBetIds.has(pred.playerId)
+  }));
+
+  // Filter predictions
   let filteredPredictions: PropPrediction[];
   
   if (selectedGame === 'all') {
@@ -191,18 +170,24 @@ export default function GoalscorerTable() {
 
   const formatProbability = (prob: number) => `${(prob * 100).toFixed(1)}%`;
   
-  // Convert probability to American odds format
-  const formatOdds = (prob: number) => {
+  // Convert probability to American odds format (Fair Odds)
+  const formatFairOdds = (prob: number) => {
     if (prob <= 0 || prob >= 1) return '-';
     if (prob >= 0.5) {
-      // Favorite: negative odds
       const odds = Math.round((-100 * prob) / (1 - prob));
       return odds.toString();
     } else {
-      // Underdog: positive odds
       const odds = Math.round((100 * (1 - prob)) / prob);
       return `+${odds}`;
     }
+  };
+  
+  // Format sportsbook odds (from API when available)
+  const formatBookOdds = (pred: PropPrediction) => {
+    if (pred.bookmakerOdds) {
+      return pred.bookmakerOdds > 0 ? `+${pred.bookmakerOdds}` : pred.bookmakerOdds.toString();
+    }
+    return '-'; // Will show "-" until API credits reset
   };
   
   // Format confidence as visual indicator
@@ -231,7 +216,7 @@ export default function GoalscorerTable() {
               <div className="text-slate-500">Players</div>
             </div>
             <div className="text-center">
-              <div className="text-2xl font-bold text-emerald-400">{valueBets.length}</div>
+              <div className="text-2xl font-bold text-emerald-400">{propsData?.valueBets?.length || 0}</div>
               <div className="text-slate-500">Top Picks</div>
             </div>
           </div>
@@ -239,45 +224,46 @@ export default function GoalscorerTable() {
       </div>
 
       {/* Top Picks Section */}
-      {valueBets.length > 0 && (
-        <div className="mb-8">
-          <h3 className="text-lg font-bold text-emerald-400 mb-4 flex items-center gap-2">
-            <span>🎯</span> Top Picks (Highest Probability + Confidence)
+      {propsData.valueBets && propsData.valueBets.length > 0 && (
+        <div className="mb-6">
+          <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+            🎯 Top Picks
+            <span className="text-sm font-normal text-slate-400">Best combination of probability & confidence</span>
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {valueBets.slice(0, 6).map((pred, index) => (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {propsData.valueBets.slice(0, 6).map((pred, index) => (
               <div 
-                key={`value-${pred.playerId}-${index}`}
-                className="bg-gradient-to-br from-emerald-900/30 to-emerald-800/20 border border-emerald-700/50 rounded-xl p-4"
+                key={pred.playerId}
+                className="bg-gradient-to-r from-emerald-900/20 to-blue-900/20 border border-emerald-800/50 rounded-lg p-3"
               >
-                <div className="flex items-start justify-between mb-3">
-                  <div className="flex items-center gap-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
                     <div 
-                      className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold"
+                      className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold"
                       style={{ backgroundColor: teamColors[pred.teamAbbrev] || '#374151', color: 'white' }}
                     >
                       {pred.teamAbbrev}
                     </div>
                     <div>
-                      <h4 className="font-semibold text-white">{pred.playerName}</h4>
-                      <p className="text-slate-400 text-sm">{pred.isHome ? 'vs' : '@'} {pred.opponentAbbrev}</p>
+                      <div className="font-medium text-white">{pred.playerName}</div>
+                      <div className="text-xs text-slate-400">
+                        {pred.isHome ? 'vs' : '@'} {pred.opponentAbbrev} • {pred.gameTime}
+                      </div>
                     </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-emerald-400 font-bold text-lg">
-                      #{index + 1}
-                    </div>
-                    <div className="text-slate-500 text-xs">rank</div>
+                    <div className="text-emerald-400 font-bold text-sm">#{index + 1}</div>
+                    <div className="text-xs text-slate-500">rank</div>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div className="bg-slate-900/50 rounded-lg p-2">
-                    <div className="text-slate-500 text-xs">Probability</div>
+                <div className="mt-2 flex justify-between text-sm">
+                  <div>
+                    <div className="text-slate-500">Probability</div>
                     <div className="text-white font-semibold">{formatProbability(pred.probability)}</div>
                   </div>
-                  <div className="bg-slate-900/50 rounded-lg p-2">
-                    <div className="text-slate-500 text-xs">Confidence</div>
-                    <div className="text-white font-semibold">{(pred.confidence * 100).toFixed(0)}%</div>
+                  <div>
+                    <div className="text-slate-500">Confidence</div>
+                    <div className="text-white font-semibold">{Math.round(pred.confidence * 100)}%</div>
                   </div>
                 </div>
               </div>
@@ -287,9 +273,8 @@ export default function GoalscorerTable() {
       )}
 
       {/* Filters */}
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-6 gap-4">
-        <div className="flex items-center gap-4 flex-wrap">
-          {/* Game Selector Dropdown */}
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+        <div className="flex flex-wrap items-center gap-3">
           <select
             value={selectedGame}
             onChange={(e) => setSelectedGame(e.target.value)}
@@ -366,7 +351,8 @@ export default function GoalscorerTable() {
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Time</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Exp. Goals</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Probability</th>
-              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Model Odds</th>
+              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm" title="Fair odds calculated from model probability">Fair Odds</th>
+              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm" title="Live odds from sportsbooks (coming soon)">Book Odds</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Confidence</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Status</th>
             </tr>
@@ -432,8 +418,13 @@ export default function GoalscorerTable() {
                       pred.probability >= 0.4 ? 'text-emerald-400' :
                       pred.probability >= 0.25 ? 'text-amber-400' :
                       'text-slate-400'
-                    }`}>
-                      {formatOdds(pred.probability)}
+                    }`} title="What the odds should be based on our model">
+                      {formatFairOdds(pred.probability)}
+                    </span>
+                  </td>
+                  <td className="py-3 px-2 text-center">
+                    <span className="font-mono text-sm text-slate-500" title="Sportsbook odds - available when API resets">
+                      {formatBookOdds(pred)}
                     </span>
                   </td>
                   <td className="py-3 px-2 text-center">
@@ -471,31 +462,19 @@ export default function GoalscorerTable() {
       )}
 
       {/* Model Info */}
-      <div className="mt-8 p-4 bg-slate-900/50 border border-slate-800 rounded-xl">
-        <div className="flex items-start gap-3">
-          <span className="text-2xl">🧠</span>
-          <div>
-            <h3 className="font-semibold text-white mb-1">How This Model Works</h3>
-            <p className="text-slate-400 text-sm">
-              Predictions are generated using a Poisson distribution model based on each player's 
-              goals-per-game rate. We weight recent performance (last 10 games) at 30% and season 
-              average at 70%, then apply situational adjustments for home/away (+/-5%), 
-              back-to-back games (-15%), and opponent strength. 
-            </p>
-            <p className="text-slate-400 text-sm mt-2">
-              <strong className="text-white">Confidence</strong> is based on prediction certainty: 
-              scoring consistency (how similar recent form is to season average), 
-              sample size, and how clear the probability is (extreme probabilities are more reliable).
-            </p>
-          </div>
+      <div className="mt-6 p-4 bg-slate-800/30 rounded-lg">
+        <h4 className="text-sm font-medium text-slate-400 mb-2">About the Predictions</h4>
+        <div className="text-xs text-slate-500 space-y-1">
+          <p><strong>Fair Odds:</strong> What the odds should be based on our model&apos;s probability (no vig)</p>
+          <p><strong>Book Odds:</strong> Live sportsbook odds from DraftKings, FanDuel, etc. (coming January)</p>
+          <p><strong>Probability:</strong> Model-predicted chance of scoring using Poisson distribution</p>
+          <p><strong>Confidence:</strong> How reliable the prediction is (player quality, form, matchup)</p>
+          <p><strong>Top Picks:</strong> Best combination of high probability and high confidence</p>
+        </div>
+        <div className="mt-2 text-xs text-slate-600">
+          Last updated: {propsData?.lastUpdated ? new Date(propsData.lastUpdated).toLocaleString() : 'N/A'}
         </div>
       </div>
-
-      {propsData?.error && (
-        <div className="mt-4 p-3 bg-amber-900/20 border border-amber-700/50 rounded-lg">
-          <p className="text-amber-400 text-sm">⚠️ {propsData.error}</p>
-        </div>
-      )}
     </div>
   );
 }
