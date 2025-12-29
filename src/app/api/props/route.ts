@@ -300,9 +300,14 @@ export async function GET(request: Request) {
     const teamFilter = searchParams.get('team');
     
     // Get today's schedule
-    const todaySchedule = await getWeekSchedule();
+    const weekSchedule = await getWeekSchedule();
     
-    if (!todaySchedule?.games?.length) {
+    // Get today's games from the week schedule
+    const today = new Date().toISOString().split('T')[0];
+    const todaySchedule = weekSchedule.find(d => d.date === today);
+    const todayGames = todaySchedule?.games || weekSchedule[0]?.games || [];
+    
+    if (!todayGames.length) {
       return NextResponse.json({
         predictions: [],
         valueBets: [],
@@ -312,11 +317,11 @@ export async function GET(request: Request) {
       });
     }
     
-    console.log(`Found ${todaySchedule.games.length} games today`);
+    console.log(`Found ${todayGames.length} games today`);
     
     // Collect team abbreviations
     const teamAbbrevs: string[] = [];
-    todaySchedule.games.forEach(game => {
+    todayGames.forEach((game: any) => {
       if (game.homeTeam?.abbrev) teamAbbrevs.push(game.homeTeam.abbrev);
       if (game.awayTeam?.abbrev) teamAbbrevs.push(game.awayTeam.abbrev);
     });
@@ -332,7 +337,7 @@ export async function GET(request: Request) {
     let totalPlayers = 0;
     
     // Process games in parallel
-    const gamePromises = todaySchedule.games.map(async (game) => {
+    const gamePromises = todayGames.map(async (game: any) => {
       try {
         const homeAbbrev = game.homeTeam?.abbrev;
         const awayAbbrev = game.awayTeam?.abbrev;
@@ -464,7 +469,7 @@ export async function GET(request: Request) {
       predictions: filteredPredictions,
       valueBets: topPicks,
       lastUpdated: new Date().toISOString(),
-      gamesAnalyzed: todaySchedule.games.length,
+      gamesAnalyzed: todayGames.length,
       playersAnalyzed: totalPlayers,
     });
     
