@@ -33,7 +33,6 @@ interface PropPrediction {
   };
 }
 
-// Manual injury list
 const INJURED_PLAYERS: Record<string, string[]> = {
   'COL': ['Gabriel Landeskog'],
   'EDM': ['Evander Kane'],
@@ -43,7 +42,6 @@ const INJURED_PLAYERS: Record<string, string[]> = {
   'PHI': ['Tyson Foerster'],
 };
 
-// Elite scorers get confidence boost
 const ELITE_SCORERS = new Set([
   'Connor McDavid', 'Nathan MacKinnon', 'Auston Matthews', 'Leon Draisaitl',
   'Nikita Kucherov', 'David Pastrnak', 'Cale Makar', 'Kirill Kaprizov',
@@ -68,28 +66,6 @@ function poissonAtLeastOne(lambda: number): number {
   return 1 - Math.exp(-lambda);
 }
 
-async function getTeamGAA(teamAbbrev: string): Promise<number> {
-  try {
-    const response = await fetch('https://api-web.nhle.com/v1/standings/now');
-    if (!response.ok) return 3.0;
-    const data = await response.json();
-    const team = (data.standings || []).find((t: any) => t.teamAbbrev?.default === teamAbbrev);
-    return team && team.gamesPlayed > 0 ? team.goalAgainst / team.gamesPlayed : 3.0;
-  } catch { return 3.0; }
-}
-
-async function isBackToBack(teamAbbrev: string): Promise<boolean> {
-  try {
-    const response = await fetch(`https://api-web.nhle.com/v1/club-schedule/${teamAbbrev}/week/now`);
-    if (!response.ok) return false;
-    const data = await response.json();
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toISOString().split('T')[0];
-    return (data.games || []).some((g: any) => g.gameDate === yesterdayStr);
-  } catch { return false; }
-}
-
 async function getPlayerStats(teamAbbrev: string): Promise<any[]> {
   try {
     const response = await fetch(`https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`);
@@ -108,14 +84,14 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
     const awayAbbrev = game.awayTeam?.abbrev;
     if (!homeAbbrev || !awayAbbrev) return { predictions, playerCount };
     
-    const [homePlayers, awayPlayers, homeB2B, awayB2B, homeGAA, awayGAA] = await Promise.all([
+    console.log(`Processing game: ${awayAbbrev} @ ${homeAbbrev}`);
+    
+    const [homePlayers, awayPlayers] = await Promise.all([
       getPlayerStats(homeAbbrev),
       getPlayerStats(awayAbbrev),
-      isBackToBack(homeAbbrev),
-      isBackToBack(awayAbbrev),
-      getTeamGAA(homeAbbrev),
-      getTeamGAA(awayAbbrev),
     ]);
+    
+    console.log(`  Home players: ${homePlayers.length}, Away players: ${awayPlayers.length}`);
     
     let gameTime = 'TBD';
     if (game.startTimeUTC) {
@@ -139,23 +115,12 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
       
       const gamesPlayed = player.gamesPlayed || 1;
       const goals = player.goals || 0;
-      const shots = player.shots || 0;
-      
       if (gamesPlayed < 10) continue;
       
       const baseLambda = goals / gamesPlayed;
       if (baseLambda < 0.05) continue;
       
-      const homeAwayAdj = 1.05;
-      const b2bAdj = homeB2B ? 0.85 : 1.0;
-      let opponentAdj = 1.0;
-      if (awayGAA >= 3.5) opponentAdj = 1.12;
-      else if (awayGAA <= 2.5) opponentAdj = 0.88;
-      
-      const shotsPerGame = shots / gamesPlayed;
-      const toiAdj = Math.min(1.15, Math.max(0.85, 0.9 + shotsPerGame * 0.05));
-      
-      const finalLambda = baseLambda * homeAwayAdj * b2bAdj * opponentAdj * toiAdj;
+      const finalLambda = baseLambda * 1.05;
       const probability = poissonAtLeastOne(finalLambda);
       
       let confidence = 0.3;
@@ -163,8 +128,6 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
       else if (baseLambda >= 0.35) confidence += 0.25;
       else if (baseLambda >= 0.20) confidence += 0.15;
       if (gamesPlayed >= 30) confidence += 0.15;
-      else if (gamesPlayed >= 20) confidence += 0.10;
-      if (!homeB2B) confidence += 0.05;
       confidence = Math.min(0.95, confidence);
       
       predictions.push({
@@ -182,7 +145,7 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
         line: 0.5,
         confidence,
         isValueBet: false,
-        breakdown: { basePrediction: baseLambda, homeAwayAdj, backToBackAdj: b2bAdj, opponentAdj, recentFormAdj: 1.0, goalieAdj: 1.0, toiAdj, shotVolumeAdj: 1.0, finalPrediction: finalLambda },
+        breakdown: { basePrediction: baseLambda, homeAwayAdj: 1.05, backToBackAdj: 1.0, opponentAdj: 1.0, recentFormAdj: 1.0, goalieAdj: 1.0, toiAdj: 1.0, shotVolumeAdj: 1.0, finalPrediction: finalLambda },
       });
       playerCount++;
     }
@@ -194,23 +157,12 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
       
       const gamesPlayed = player.gamesPlayed || 1;
       const goals = player.goals || 0;
-      const shots = player.shots || 0;
-      
       if (gamesPlayed < 10) continue;
       
       const baseLambda = goals / gamesPlayed;
       if (baseLambda < 0.05) continue;
       
-      const homeAwayAdj = 0.95;
-      const b2bAdj = awayB2B ? 0.85 : 1.0;
-      let opponentAdj = 1.0;
-      if (homeGAA >= 3.5) opponentAdj = 1.12;
-      else if (homeGAA <= 2.5) opponentAdj = 0.88;
-      
-      const shotsPerGame = shots / gamesPlayed;
-      const toiAdj = Math.min(1.15, Math.max(0.85, 0.9 + shotsPerGame * 0.05));
-      
-      const finalLambda = baseLambda * homeAwayAdj * b2bAdj * opponentAdj * toiAdj;
+      const finalLambda = baseLambda * 0.95;
       const probability = poissonAtLeastOne(finalLambda);
       
       let confidence = 0.3;
@@ -218,8 +170,6 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
       else if (baseLambda >= 0.35) confidence += 0.25;
       else if (baseLambda >= 0.20) confidence += 0.15;
       if (gamesPlayed >= 30) confidence += 0.15;
-      else if (gamesPlayed >= 20) confidence += 0.10;
-      if (!awayB2B) confidence += 0.05;
       confidence = Math.min(0.95, confidence);
       
       predictions.push({
@@ -237,10 +187,12 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
         line: 0.5,
         confidence,
         isValueBet: false,
-        breakdown: { basePrediction: baseLambda, homeAwayAdj, backToBackAdj: b2bAdj, opponentAdj, recentFormAdj: 1.0, goalieAdj: 1.0, toiAdj, shotVolumeAdj: 1.0, finalPrediction: finalLambda },
+        breakdown: { basePrediction: baseLambda, homeAwayAdj: 0.95, backToBackAdj: 1.0, opponentAdj: 1.0, recentFormAdj: 1.0, goalieAdj: 1.0, toiAdj: 1.0, shotVolumeAdj: 1.0, finalPrediction: finalLambda },
       });
       playerCount++;
     }
+    
+    console.log(`  Generated ${predictions.length} predictions`);
   } catch (error) {
     console.error('Error processing game:', error);
   }
@@ -251,11 +203,43 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
 export async function GET(request: Request) {
   try {
     const weekSchedule = await getWeekSchedule();
-    const today = new Date().toISOString().split('T')[0];
-    const todaySchedule = weekSchedule.find(d => d.date === today);
-    const todayGames = todaySchedule?.games || weekSchedule[0]?.games || [];
+    
+    // Find today's games - try multiple date formats
+    const now = new Date();
+    const todayISO = now.toISOString().split('T')[0];
+    
+    // Also try EST date (might be different from UTC)
+    const estDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const todayEST = estDate.toISOString().split('T')[0];
+    
+    console.log(`Looking for games on: ${todayISO} (UTC) or ${todayEST} (EST)`);
+    console.log(`Week schedule has ${weekSchedule.length} days`);
+    
+    let todayGames: any[] = [];
+    
+    // Try to find today's games
+    for (const day of weekSchedule) {
+      console.log(`  Day: ${day.date} has ${day.games?.length || 0} games`);
+      if (day.date === todayISO || day.date === todayEST) {
+        todayGames = day.games || [];
+        console.log(`  Found ${todayGames.length} games for today`);
+        break;
+      }
+    }
+    
+    // If no games found for today, use first day with games
+    if (todayGames.length === 0 && weekSchedule.length > 0) {
+      for (const day of weekSchedule) {
+        if (day.games && day.games.length > 0) {
+          todayGames = day.games;
+          console.log(`Using ${day.date} with ${todayGames.length} games`);
+          break;
+        }
+      }
+    }
     
     if (!todayGames.length) {
+      console.log('No games found');
       return NextResponse.json({
         predictions: [], valueBets: [], lastUpdated: new Date().toISOString(),
         gamesAnalyzed: 0, playersAnalyzed: 0,
@@ -264,7 +248,7 @@ export async function GET(request: Request) {
     
     console.log(`Processing ${todayGames.length} games...`);
     
-    // Process all games in PARALLEL
+    // Process all games in parallel
     const results = await Promise.all(todayGames.map((game: any) => processGame(game)));
     
     const allPredictions: PropPrediction[] = [];
@@ -275,7 +259,7 @@ export async function GET(request: Request) {
       totalPlayers += result.playerCount;
     }
     
-    console.log(`Generated ${allPredictions.length} predictions from ${totalPlayers} players`);
+    console.log(`Total: ${allPredictions.length} predictions from ${totalPlayers} players`);
     
     allPredictions.sort((a, b) => b.probability - a.probability);
     
