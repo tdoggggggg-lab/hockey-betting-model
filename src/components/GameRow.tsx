@@ -3,21 +3,17 @@
 interface GameRowProps {
   game: {
     id: string;
-    homeTeam: { name: string; abbreviation: string; };
-    awayTeam: { name: string; abbreviation: string; };
+    homeTeam: { id?: number; name: string; abbreviation: string; };
+    awayTeam: { id?: number; name: string; abbreviation: string; };
     startTime: string;
     status: string;
-    prediction: {
+    prediction?: {
       homeWinProbability: number;
       awayWinProbability: number;
       predictedTotal: number;
       confidence: number;
-      recommendation: string;
-      reasoning: string[];
     };
-    homeStats?: any;
-    awayStats?: any;
-    factors?: any;
+    odds?: any[];
   };
 }
 
@@ -33,13 +29,14 @@ const teamColors: Record<string, string> = {
 };
 
 function formatTime(dateString: string): string {
+  if (!dateString) return 'TBD';
   try {
     const date = new Date(dateString);
     return date.toLocaleTimeString('en-US', { 
       hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York'
-    });
+    }) + ' ET';
   } catch {
-    return dateString;
+    return 'TBD';
   }
 }
 
@@ -51,19 +48,23 @@ function probToOdds(prob: number): string {
 }
 
 export default function GameRow({ game }: GameRowProps) {
-  const { prediction, homeTeam, awayTeam } = game;
+  const prediction = game.prediction || {
+    homeWinProbability: 0.5,
+    awayWinProbability: 0.5,
+    predictedTotal: 5.5,
+    confidence: 0.5,
+  };
+  
   const homeProb = prediction.homeWinProbability;
   const awayProb = prediction.awayWinProbability;
-  
-  const favorite = homeProb > awayProb ? 'home' : 'away';
-  const favoriteAbbrev = favorite === 'home' ? homeTeam.abbreviation : awayTeam.abbreviation;
+  const favoriteAbbrev = homeProb > awayProb ? game.homeTeam.abbreviation : game.awayTeam.abbreviation;
   const favoriteProb = Math.max(homeProb, awayProb);
   
   const confDisplay = prediction.confidence >= 0.65 
-    ? { label: 'High', color: 'text-emerald-400', dots: '●●●' }
+    ? { label: 'High', color: 'text-emerald-400', bg: 'bg-emerald-500/20' }
     : prediction.confidence >= 0.50 
-    ? { label: 'Medium', color: 'text-yellow-400', dots: '●●○' }
-    : { label: 'Low', color: 'text-slate-500', dots: '●○○' };
+    ? { label: 'Medium', color: 'text-yellow-400', bg: 'bg-yellow-500/20' }
+    : { label: 'Low', color: 'text-slate-500', bg: 'bg-slate-500/20' };
 
   return (
     <div className="bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-700 transition-all">
@@ -74,11 +75,11 @@ export default function GameRow({ game }: GameRowProps) {
             {/* Away Team */}
             <div className="flex items-center gap-3 mb-2">
               <div className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold"
-                style={{ backgroundColor: teamColors[awayTeam.abbreviation] || '#374151', color: 'white' }}>
-                {awayTeam.abbreviation}
+                style={{ backgroundColor: teamColors[game.awayTeam.abbreviation] || '#374151', color: 'white' }}>
+                {game.awayTeam.abbreviation}
               </div>
               <div className="flex-1">
-                <span className="text-white font-medium">{awayTeam.name}</span>
+                <span className="text-white font-medium">{game.awayTeam.name}</span>
                 <span className={`ml-2 text-sm ${awayProb > homeProb ? 'text-emerald-400 font-bold' : 'text-slate-400'}`}>
                   ({Math.round(awayProb * 100)}%)
                 </span>
@@ -95,11 +96,11 @@ export default function GameRow({ game }: GameRowProps) {
             {/* Home Team */}
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold"
-                style={{ backgroundColor: teamColors[homeTeam.abbreviation] || '#374151', color: 'white' }}>
-                {homeTeam.abbreviation}
+                style={{ backgroundColor: teamColors[game.homeTeam.abbreviation] || '#374151', color: 'white' }}>
+                {game.homeTeam.abbreviation}
               </div>
               <div className="flex-1">
-                <span className="text-white font-medium">{homeTeam.name}</span>
+                <span className="text-white font-medium">{game.homeTeam.name}</span>
                 <span className={`ml-2 text-sm ${homeProb > awayProb ? 'text-emerald-400 font-bold' : 'text-slate-400'}`}>
                   ({Math.round(homeProb * 100)}%)
                 </span>
@@ -118,8 +119,8 @@ export default function GameRow({ game }: GameRowProps) {
             <div className="text-slate-500 text-xs">
               Total: <span className="text-white">{prediction.predictedTotal.toFixed(1)}</span>
             </div>
-            <div className={`text-xs mt-1 ${confDisplay.color}`}>
-              {confDisplay.dots} {confDisplay.label}
+            <div className={`text-xs mt-1 px-2 py-0.5 rounded ${confDisplay.bg} ${confDisplay.color}`}>
+              {confDisplay.label}
             </div>
           </div>
         </div>
@@ -136,7 +137,7 @@ export default function GameRow({ game }: GameRowProps) {
                 ({Math.round(favoriteProb * 100)}%)
               </span>
             </span>
-            {prediction.recommendation !== 'PASS' && (
+            {favoriteProb >= 0.58 && prediction.confidence >= 0.55 && (
               <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-xs font-medium">
                 ✓ BET
               </span>
@@ -146,17 +147,6 @@ export default function GameRow({ game }: GameRowProps) {
             Confidence: <span className="text-white">{Math.round(prediction.confidence * 100)}%</span>
           </div>
         </div>
-        
-        {/* Reasoning */}
-        {prediction.reasoning && prediction.reasoning.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {prediction.reasoning.slice(0, 3).map((reason, i) => (
-              <span key={i} className="text-xs text-slate-400 bg-slate-800/50 px-2 py-1 rounded">
-                {reason}
-              </span>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );
