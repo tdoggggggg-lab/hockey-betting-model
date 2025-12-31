@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { getWeekSchedule } from '@/lib/nhl-api';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -33,14 +32,103 @@ interface PropPrediction {
   };
 }
 
-const INJURED_PLAYERS: Record<string, string[]> = {
-  'COL': ['Gabriel Landeskog'],
-  'EDM': ['Evander Kane'],
-  'TBL': ['Brandon Hagel'],
-  'CAR': ['Seth Jarvis'],
-  'VAN': ['Thatcher Demko'],
-  'PHI': ['Tyson Foerster'],
-};
+// ============ INJURY DATA ============
+interface InjuryInfo {
+  name: string;
+  status: string;
+  detail: string;
+}
+
+// In-memory injury cache
+let injuryCache: Record<string, InjuryInfo[]> = {};
+let lastInjuryFetch = 0;
+
+async function fetchInjuries(): Promise<Record<string, InjuryInfo[]>> {
+  const now = Date.now();
+  // Cache for 1 hour
+  if (now - lastInjuryFetch < 3600000 && Object.keys(injuryCache).length > 0) {
+    return injuryCache;
+  }
+  
+  const injuries: Record<string, InjuryInfo[]> = {};
+  const teams = ['EDM', 'COL', 'TOR', 'TBL', 'BOS', 'FLA', 'DAL', 'VGK', 'NYR', 'NJD',
+                 'CAR', 'WPG', 'MIN', 'VAN', 'LAK', 'CGY', 'OTT', 'DET', 'BUF', 'PIT',
+                 'WSH', 'PHI', 'NYI', 'CBJ', 'MTL', 'CHI', 'NSH', 'STL', 'ANA', 'SJS', 'SEA', 'UTA'];
+  
+  try {
+    await Promise.all(teams.map(async (teamAbbrev) => {
+      try {
+        const res = await fetch(`https://api-web.nhle.com/v1/roster/${teamAbbrev}/current`);
+        if (!res.ok) return;
+        
+        const data = await res.json();
+        const teamInjuries: InjuryInfo[] = [];
+        
+        const allPlayers = [
+          ...(data.forwards || []),
+          ...(data.defensemen || []),
+          ...(data.goalies || []),
+        ];
+        
+        for (const player of allPlayers) {
+          if (player.injuryStatus || player.injuries) {
+            const name = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
+            teamInjuries.push({
+              name,
+              status: player.injuryStatus || 'OUT',
+              detail: player.injuryDescription || 'Unknown',
+            });
+          }
+        }
+        
+        if (teamInjuries.length > 0) {
+          injuries[teamAbbrev] = teamInjuries;
+        }
+      } catch {
+        // Skip team
+      }
+    }));
+    
+    // Manual backup for known long-term injuries
+    const manualInjuries: Record<string, InjuryInfo[]> = {
+      'COL': [{ name: 'Gabriel Landeskog', status: 'LTIR', detail: 'Knee' }],
+      'EDM': [{ name: 'Evander Kane', status: 'LTIR', detail: 'Hernia' }],
+      'TBL': [{ name: 'Brandon Hagel', status: 'IR', detail: 'Lower Body' }],
+      'CAR': [{ name: 'Seth Jarvis', status: 'IR', detail: 'Upper Body' }],
+      'VAN': [{ name: 'Thatcher Demko', status: 'IR', detail: 'Lower Body' }],
+    };
+    
+    for (const [team, players] of Object.entries(manualInjuries)) {
+      if (!injuries[team]) injuries[team] = [];
+      for (const player of players) {
+        if (!injuries[team].some(p => p.name === player.name)) {
+          injuries[team].push(player);
+        }
+      }
+    }
+    
+    injuryCache = injuries;
+    lastInjuryFetch = now;
+    
+  } catch (error) {
+    console.error('Error fetching injuries:', error);
+  }
+  
+  return injuries;
+}
+
+function isPlayerInjured(name: string, teamAbbrev: string, injuries: Record<string, InjuryInfo[]>): boolean {
+  const teamInjuries = injuries[teamAbbrev] || [];
+  const nameLower = name.toLowerCase();
+  const lastName = name.split(' ').pop()?.toLowerCase() || '';
+  
+  return teamInjuries.some(injured => {
+    const injuredLower = injured.name.toLowerCase();
+    return injuredLower === nameLower || injuredLower.includes(lastName);
+  });
+}
+
+// ============ END INJURY DATA ============
 
 const ELITE_SCORERS = new Set([
   'Connor McDavid', 'Nathan MacKinnon', 'Auston Matthews', 'Leon Draisaitl',
@@ -52,15 +140,6 @@ const ELITE_SCORERS = new Set([
   'Quinn Hughes', 'Zach Hyman', 'William Nylander', 'Jason Robertson',
   'Tage Thompson', 'Dylan Larkin', 'Trevor Zegras', 'Clayton Keller',
 ]);
-
-function isPlayerInjured(name: string, teamAbbrev: string): boolean {
-  const teamInjuries = INJURED_PLAYERS[teamAbbrev] || [];
-  const nameLower = name.toLowerCase();
-  return teamInjuries.some(injured => 
-    injured.toLowerCase() === nameLower ||
-    nameLower.includes(injured.split(' ')[1]?.toLowerCase() || '')
-  );
-}
 
 function poissonAtLeastOne(lambda: number): number {
   return 1 - Math.exp(-lambda);
@@ -75,7 +154,10 @@ async function getPlayerStats(teamAbbrev: string): Promise<any[]> {
   } catch { return []; }
 }
 
-async function processGame(game: any): Promise<{ predictions: PropPrediction[], playerCount: number }> {
+async function processGame(
+  game: any, 
+  injuries: Record<string, InjuryInfo[]>
+): Promise<{ predictions: PropPrediction[], playerCount: number }> {
   const predictions: PropPrediction[] = [];
   let playerCount = 0;
   
@@ -111,7 +193,12 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
     // Process home team
     for (const player of homePlayers) {
       const name = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
-      if (isPlayerInjured(name, homeAbbrev)) continue;
+      
+      // AUTOMATIC INJURY CHECK
+      if (isPlayerInjured(name, homeAbbrev, injuries)) {
+        console.log(`  Skipping injured player: ${name} (${homeAbbrev})`);
+        continue;
+      }
       
       const gamesPlayed = player.gamesPlayed || 1;
       const goals = player.goals || 0;
@@ -153,7 +240,12 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
     // Process away team
     for (const player of awayPlayers) {
       const name = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
-      if (isPlayerInjured(name, awayAbbrev)) continue;
+      
+      // AUTOMATIC INJURY CHECK
+      if (isPlayerInjured(name, awayAbbrev, injuries)) {
+        console.log(`  Skipping injured player: ${name} (${awayAbbrev})`);
+        continue;
+      }
       
       const gamesPlayed = player.gamesPlayed || 1;
       const goals = player.goals || 0;
@@ -200,46 +292,41 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
   return { predictions, playerCount };
 }
 
-export async function GET(request: Request) {
+export async function GET() {
   try {
-    const weekSchedule = await getWeekSchedule();
+    // Fetch injuries first
+    const injuries = await fetchInjuries();
+    console.log(`Loaded injuries for ${Object.keys(injuries).length} teams`);
     
-    // Find today's games - try multiple date formats
-    const now = new Date();
-    const todayISO = now.toISOString().split('T')[0];
+    // Fetch schedule
+    const schedRes = await fetch('https://api-web.nhle.com/v1/schedule/now');
+    if (!schedRes.ok) {
+      console.error('Schedule API failed');
+      return NextResponse.json({
+        predictions: [], valueBets: [], lastUpdated: new Date().toISOString(),
+        gamesAnalyzed: 0, playersAnalyzed: 0, error: 'Schedule API failed'
+      });
+    }
     
-    // Also try EST date (might be different from UTC)
-    const estDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const todayEST = estDate.toISOString().split('T')[0];
+    const schedData = await schedRes.json();
+    const gameWeek = schedData.gameWeek || [];
     
-    console.log(`Looking for games on: ${todayISO} (UTC) or ${todayEST} (EST)`);
-    console.log(`Week schedule has ${weekSchedule.length} days`);
+    console.log(`Props API: Schedule has ${gameWeek.length} days`);
     
+    // Find today's games (first day with games)
     let todayGames: any[] = [];
     
-    // Try to find today's games
-    for (const day of weekSchedule) {
+    for (const day of gameWeek) {
       console.log(`  Day: ${day.date} has ${day.games?.length || 0} games`);
-      if (day.date === todayISO || day.date === todayEST) {
-        todayGames = day.games || [];
-        console.log(`  Found ${todayGames.length} games for today`);
+      if (day.games && day.games.length > 0) {
+        todayGames = day.games;
+        console.log(`  Using ${day.date} with ${todayGames.length} games`);
         break;
       }
     }
     
-    // If no games found for today, use first day with games
-    if (todayGames.length === 0 && weekSchedule.length > 0) {
-      for (const day of weekSchedule) {
-        if (day.games && day.games.length > 0) {
-          todayGames = day.games;
-          console.log(`Using ${day.date} with ${todayGames.length} games`);
-          break;
-        }
-      }
-    }
-    
     if (!todayGames.length) {
-      console.log('No games found');
+      console.log('No games found in schedule');
       return NextResponse.json({
         predictions: [], valueBets: [], lastUpdated: new Date().toISOString(),
         gamesAnalyzed: 0, playersAnalyzed: 0,
@@ -248,8 +335,10 @@ export async function GET(request: Request) {
     
     console.log(`Processing ${todayGames.length} games...`);
     
-    // Process all games in parallel
-    const results = await Promise.all(todayGames.map((game: any) => processGame(game)));
+    // Process all games in parallel, passing injuries
+    const results = await Promise.all(
+      todayGames.map((game: any) => processGame(game, injuries))
+    );
     
     const allPredictions: PropPrediction[] = [];
     let totalPlayers = 0;
@@ -278,6 +367,7 @@ export async function GET(request: Request) {
       lastUpdated: new Date().toISOString(),
       gamesAnalyzed: todayGames.length,
       playersAnalyzed: totalPlayers,
+      injuriesLoaded: Object.keys(injuries).length,
     });
     
   } catch (error) {
