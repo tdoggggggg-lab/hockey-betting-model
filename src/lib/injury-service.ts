@@ -1,154 +1,168 @@
 /**
- * NHL Injury Service
- * Fetches injury data and calculates impact on predictions
+ * Shared Injury Service
+ * Used by both Game Lines and Goalscorer predictions
  */
 
-export interface InjuredPlayer {
-  playerId?: number;
-  name: string;
-  team: string;
-  teamAbbrev: string;
-  position: string;
-  injuryType: string;
-  status: string;
-  expectedReturn?: string;
-  lastUpdated: string;
-}
-
-export interface InjuryAdjustments {
-  injuries: Map<string, InjuredPlayer[]>;
-  isPlayerOut: (name: string, team: string) => boolean;
-  getPlayerAdjustment: (name: string, team: string, isHome: boolean, isB2B: boolean) => number;
-}
-
-// Known elite players with their GAR values
-const ELITE_PLAYERS: Record<string, { gar: number; pp1: boolean }> = {
-  'Connor McDavid': { gar: 33, pp1: true },
-  'Nathan MacKinnon': { gar: 30, pp1: true },
-  'Auston Matthews': { gar: 28, pp1: true },
-  'Leon Draisaitl': { gar: 27, pp1: true },
-  'Nikita Kucherov': { gar: 26, pp1: true },
-  'David Pastrnak': { gar: 25, pp1: true },
-  'Cale Makar': { gar: 28, pp1: true },
-  'Quinn Hughes': { gar: 22, pp1: true },
-  'Adam Fox': { gar: 20, pp1: true },
-  'Connor Hellebuyck': { gar: 25, pp1: false },
-  'Igor Shesterkin': { gar: 24, pp1: false },
-  'Matthew Tkachuk': { gar: 22, pp1: true },
-  'Jack Eichel': { gar: 21, pp1: true },
-  'Mitch Marner': { gar: 21, pp1: true },
-  'Sidney Crosby': { gar: 20, pp1: true },
-  'Aleksander Barkov': { gar: 20, pp1: true },
-  'Sam Reinhart': { gar: 19, pp1: true },
-  'Jake Guentzel': { gar: 18, pp1: true },
-  'Brady Tkachuk': { gar: 18, pp1: true },
-  'Brayden Point': { gar: 18, pp1: true },
-  'Brandon Hagel': { gar: 14, pp1: true },
-  'Tyson Foerster': { gar: 10, pp1: false },
+// Manual injury list - UPDATE THIS when players get hurt/return
+// This serves as a backup when automatic scraping fails
+export const MANUAL_INJURIES: Record<string, { name: string; status: string; detail: string; isElite?: boolean }[]> = {
+  'COL': [{ name: 'Gabriel Landeskog', status: 'LTIR', detail: 'Knee', isElite: true }],
+  'EDM': [{ name: 'Evander Kane', status: 'LTIR', detail: 'Hernia', isElite: false }],
+  'TBL': [{ name: 'Brandon Hagel', status: 'IR', detail: 'Lower Body', isElite: false }],
+  'CAR': [{ name: 'Seth Jarvis', status: 'IR', detail: 'Upper Body', isElite: false }],
+  'VAN': [{ name: 'Thatcher Demko', status: 'IR', detail: 'Lower Body', isElite: false }],
+  'PHI': [{ name: 'Tyson Foerster', status: 'DTD', detail: 'Upper Body', isElite: false }],
 };
 
-/**
- * Get known injuries (manually maintained list)
- */
-function getKnownInjuries(): Map<string, InjuredPlayer[]> {
-  const injuries = new Map<string, InjuredPlayer[]>();
-  
-  const currentInjuries: InjuredPlayer[] = [
-    { name: 'Brandon Hagel', team: 'Tampa Bay Lightning', teamAbbrev: 'TBL', position: 'LW', injuryType: 'Lower Body', status: 'IR', lastUpdated: '2024-12-20' },
-    { name: 'Tyson Foerster', team: 'Philadelphia Flyers', teamAbbrev: 'PHI', position: 'RW', injuryType: 'Upper Body', status: 'Day-to-Day', lastUpdated: '2024-12-20' },
-    { name: 'Evander Kane', team: 'Edmonton Oilers', teamAbbrev: 'EDM', position: 'LW', injuryType: 'Hernia', status: 'LTIR', lastUpdated: '2024-12-01' },
-    { name: 'Gabriel Landeskog', team: 'Colorado Avalanche', teamAbbrev: 'COL', position: 'LW', injuryType: 'Knee', status: 'LTIR', lastUpdated: '2024-10-01' },
-    { name: 'Thatcher Demko', team: 'Vancouver Canucks', teamAbbrev: 'VAN', position: 'G', injuryType: 'Lower Body', status: 'IR', lastUpdated: '2024-12-15' },
-  ];
-  
-  currentInjuries.forEach(injury => {
-    const teamInjuries = injuries.get(injury.teamAbbrev) || [];
-    teamInjuries.push(injury);
-    injuries.set(injury.teamAbbrev, teamInjuries);
-  });
-  
-  return injuries;
-}
+// Elite players - their absence significantly impacts team performance
+export const ELITE_PLAYERS: Record<string, string[]> = {
+  'EDM': ['Connor McDavid', 'Leon Draisaitl'],
+  'COL': ['Nathan MacKinnon', 'Cale Makar', 'Mikko Rantanen'],
+  'TOR': ['Auston Matthews', 'Mitch Marner', 'William Nylander'],
+  'TBL': ['Nikita Kucherov', 'Brayden Point'],
+  'BOS': ['David Pastrnak'],
+  'FLA': ['Sam Reinhart', 'Aleksander Barkov', 'Matthew Tkachuk'],
+  'DAL': ['Jason Robertson'],
+  'VGK': ['Jack Eichel', 'Mark Stone'],
+  'NYR': ['Artemi Panarin', 'Adam Fox'],
+  'NJD': ['Jack Hughes', 'Jesper Bratt'],
+  'CAR': ['Sebastian Aho', 'Andrei Svechnikov'],
+  'WPG': ['Kyle Connor', 'Mark Scheifele'],
+  'MIN': ['Kirill Kaprizov'],
+  'VAN': ['Elias Pettersson', 'J.T. Miller'],
+  'LAK': ['Adrian Kempe'],
+  'CGY': ['Nazem Kadri'],
+  'OTT': ['Brady Tkachuk', 'Tim Stutzle'],
+  'DET': ['Dylan Larkin', 'Lucas Raymond'],
+  'BUF': ['Tage Thompson', 'Rasmus Dahlin'],
+  'PIT': ['Sidney Crosby', 'Evgeni Malkin'],
+  'WSH': ['Alex Ovechkin', 'Dylan Strome'],
+  'PHI': ['Travis Konecny'],
+  'NYI': ['Mathew Barzal', 'Bo Horvat'],
+  'CBJ': ['Zach Werenski'],
+  'MTL': ['Cole Caufield', 'Nick Suzuki'],
+  'CHI': ['Connor Bedard'],
+  'NSH': ['Filip Forsberg'],
+  'STL': ['Robert Thomas'],
+  'ANA': ['Troy Terry'],
+  'SJS': ['Macklin Celebrini'],
+  'SEA': ['Jared McCann'],
+  'UTA': ['Clayton Keller'],
+};
 
 /**
  * Check if a player is injured
  */
-function isPlayerInjured(playerName: string, teamAbbrev: string, injuries: Map<string, InjuredPlayer[]>): boolean {
-  const teamInjuries = injuries.get(teamAbbrev) || [];
-  return teamInjuries.some(injury => 
-    injury.name.toLowerCase() === playerName.toLowerCase() ||
-    playerName.toLowerCase().includes(injury.name.split(' ')[1]?.toLowerCase() || '')
-  );
+export function isPlayerInjured(name: string, teamAbbrev: string, injuries?: typeof MANUAL_INJURIES): boolean {
+  const injuryList = injuries || MANUAL_INJURIES;
+  const teamInjuries = injuryList[teamAbbrev] || [];
+  const nameLower = name.toLowerCase();
+  
+  return teamInjuries.some(injured => {
+    const injuredLower = injured.name.toLowerCase();
+    // Match full name or last name
+    return injuredLower === nameLower || 
+           nameLower.includes(injured.name.split(' ')[1]?.toLowerCase() || '');
+  });
 }
 
 /**
- * Get adjustment for teammates when key players are injured
+ * Check if any elite players are injured for a team
+ * Returns list of injured elite players
  */
-function getTeammateAdjustment(playerName: string, teamAbbrev: string, injuries: Map<string, InjuredPlayer[]>): number {
-  const teamInjuries = injuries.get(teamAbbrev) || [];
-  let adjustment = 1.0;
+export function getInjuredElitePlayers(teamAbbrev: string, injuries?: typeof MANUAL_INJURIES): string[] {
+  const injuryList = injuries || MANUAL_INJURIES;
+  const teamInjuries = injuryList[teamAbbrev] || [];
+  const elitePlayers = ELITE_PLAYERS[teamAbbrev] || [];
   
-  teamInjuries.forEach(injury => {
-    const injuredPlayer = ELITE_PLAYERS[injury.name];
-    if (injuredPlayer && injuredPlayer.gar >= 15) {
-      // Star is out - linemates see decreased production
-      const currentPlayer = ELITE_PLAYERS[playerName];
-      if (currentPlayer && currentPlayer.gar >= 15) {
-        adjustment *= 1.05; // Stars take over more duties
-      } else {
-        adjustment *= 0.90; // Non-stars suffer without playmaker
+  const injuredElites: string[] = [];
+  
+  for (const elite of elitePlayers) {
+    const eliteLower = elite.toLowerCase();
+    const isInjured = teamInjuries.some(injured => {
+      const injuredLower = injured.name.toLowerCase();
+      return injuredLower === eliteLower ||
+             eliteLower.includes(injured.name.split(' ')[1]?.toLowerCase() || '') ||
+             injuredLower.includes(elite.split(' ')[1]?.toLowerCase() || '');
+    });
+    
+    if (isInjured) {
+      injuredElites.push(elite);
+    }
+  }
+  
+  return injuredElites;
+}
+
+/**
+ * Calculate team win probability adjustment based on injuries
+ * 
+ * Research-based impact:
+ * - Elite player (McDavid, MacKinnon): -8% to -12% win probability
+ * - Star player (Kaprizov, Eichel): -5% to -8%
+ * - Good player: -2% to -4%
+ * - Multiple injuries compound (but capped)
+ */
+export function getTeamInjuryImpact(teamAbbrev: string, injuries?: typeof MANUAL_INJURIES): {
+  adjustment: number;
+  injuredStars: string[];
+  description: string;
+} {
+  const injuredElites = getInjuredElitePlayers(teamAbbrev, injuries);
+  
+  if (injuredElites.length === 0) {
+    return { adjustment: 0, injuredStars: [], description: '' };
+  }
+  
+  // Calculate impact
+  let totalAdjustment = 0;
+  
+  // Tier 1 superstars (biggest impact)
+  const tier1 = ['Connor McDavid', 'Nathan MacKinnon', 'Auston Matthews', 'Nikita Kucherov'];
+  // Tier 2 stars
+  const tier2 = ['Leon Draisaitl', 'Cale Makar', 'David Pastrnak', 'Kirill Kaprizov', 
+                 'Sidney Crosby', 'Alex Ovechkin', 'Jack Eichel', 'Mitch Marner'];
+  
+  for (const player of injuredElites) {
+    if (tier1.includes(player)) {
+      totalAdjustment -= 0.10; // -10%
+    } else if (tier2.includes(player)) {
+      totalAdjustment -= 0.07; // -7%
+    } else {
+      totalAdjustment -= 0.04; // -4%
+    }
+  }
+  
+  // Cap total impact at -20%
+  totalAdjustment = Math.max(totalAdjustment, -0.20);
+  
+  const description = injuredElites.length === 1
+    ? `${injuredElites[0]} OUT`
+    : `${injuredElites.length} stars OUT`;
+  
+  return {
+    adjustment: totalAdjustment,
+    injuredStars: injuredElites,
+    description,
+  };
+}
+
+/**
+ * Fetch latest injuries (tries API first, falls back to manual)
+ */
+export async function fetchCurrentInjuries(): Promise<typeof MANUAL_INJURIES> {
+  try {
+    // Try to get from our cron cache endpoint
+    const res = await fetch(`${process.env.VERCEL_URL || 'http://localhost:3000'}/api/cron/injuries`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.injuries && Object.keys(data.injuries).length > 0) {
+        return data.injuries;
       }
     }
-  });
-  
-  return adjustment;
-}
-
-/**
- * Apply situational modifiers
- */
-function applySituationalModifiers(baseAdjustment: number, isHome: boolean, isBackToBack: boolean): number {
-  let modifier = baseAdjustment;
-  
-  if (!isHome && baseAdjustment < 1.0) {
-    modifier *= 0.95; // Road penalty compounds injury impact
+  } catch {
+    // Fall through to manual list
   }
   
-  if (isBackToBack && baseAdjustment < 1.0) {
-    modifier *= 0.93; // B2B penalty compounds injury impact
-  }
-  
-  return modifier;
-}
-
-/**
- * Main function to get injury adjustments
- */
-export async function getInjuryAdjustmentsAsync(teamAbbrevs: string[]): Promise<InjuryAdjustments> {
-  const injuries = getKnownInjuries();
-  
-  console.log(`Loaded injuries for ${injuries.size} teams`);
-  
-  return {
-    injuries,
-    isPlayerOut: (name: string, team: string) => isPlayerInjured(name, team, injuries),
-    getPlayerAdjustment: (name: string, team: string, isHome: boolean, isB2B: boolean) => {
-      const baseAdjustment = getTeammateAdjustment(name, team, injuries);
-      return applySituationalModifiers(baseAdjustment, isHome, isB2B);
-    },
-  };
-}
-
-// Synchronous version for backward compatibility
-export function getInjuryAdjustments(): InjuryAdjustments {
-  const injuries = getKnownInjuries();
-  
-  return {
-    injuries,
-    isPlayerOut: (name: string, team: string) => isPlayerInjured(name, team, injuries),
-    getPlayerAdjustment: (name: string, team: string, isHome: boolean, isB2B: boolean) => {
-      const baseAdjustment = getTeammateAdjustment(name, team, injuries);
-      return applySituationalModifiers(baseAdjustment, isHome, isB2B);
-    },
-  };
+  return MANUAL_INJURIES;
 }
