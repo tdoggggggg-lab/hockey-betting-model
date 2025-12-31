@@ -32,7 +32,6 @@ interface PropPrediction {
   };
 }
 
-// Known injured players (manual list)
 const INJURED_PLAYERS: Record<string, string[]> = {
   'COL': ['Gabriel Landeskog'],
   'EDM': ['Evander Kane'],
@@ -90,8 +89,6 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
       getPlayerStats(homeAbbrev),
       getPlayerStats(awayAbbrev),
     ]);
-    
-    console.log(`  Home players: ${homePlayers.length}, Away players: ${awayPlayers.length}`);
     
     let gameTime = 'TBD';
     if (game.startTimeUTC) {
@@ -202,25 +199,57 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
 
 export async function GET() {
   try {
-    const schedRes = await fetch('https://api-web.nhle.com/v1/schedule/now');
-    if (!schedRes.ok) {
+    // Try multiple schedule endpoints for reliability
+    let schedData: any = null;
+    
+    // Try /schedule/now first
+    try {
+      const res1 = await fetch('https://api-web.nhle.com/v1/schedule/now', {
+        headers: { 'Accept': 'application/json' }
+      });
+      if (res1.ok) {
+        schedData = await res1.json();
+      }
+    } catch (e) {
+      console.log('Schedule/now failed, trying alternative...');
+    }
+    
+    // Fallback to specific date if /now fails
+    if (!schedData || !schedData.gameWeek) {
+      const today = new Date().toISOString().split('T')[0];
+      try {
+        const res2 = await fetch(`https://api-web.nhle.com/v1/schedule/${today}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (res2.ok) {
+          schedData = await res2.json();
+        }
+      } catch (e) {
+        console.log('Schedule by date also failed');
+      }
+    }
+    
+    if (!schedData || !schedData.gameWeek) {
+      console.log('All schedule endpoints failed');
       return NextResponse.json({
         predictions: [], valueBets: [], lastUpdated: new Date().toISOString(),
-        gamesAnalyzed: 0, playersAnalyzed: 0, error: 'Schedule API failed'
+        gamesAnalyzed: 0, playersAnalyzed: 0, 
+        message: 'No games scheduled today. Check back tomorrow!',
       });
     }
     
-    const schedData = await schedRes.json();
     const gameWeek = schedData.gameWeek || [];
-    
     console.log(`Props API: Schedule has ${gameWeek.length} days`);
     
+    // Find FIRST day with games (might not be today)
     let todayGames: any[] = [];
+    let gameDate = '';
     
     for (const day of gameWeek) {
       console.log(`  Day: ${day.date} has ${day.games?.length || 0} games`);
       if (day.games && day.games.length > 0) {
         todayGames = day.games;
+        gameDate = day.date;
         console.log(`  Using ${day.date} with ${todayGames.length} games`);
         break;
       }
@@ -230,10 +259,11 @@ export async function GET() {
       return NextResponse.json({
         predictions: [], valueBets: [], lastUpdated: new Date().toISOString(),
         gamesAnalyzed: 0, playersAnalyzed: 0,
+        message: 'No games scheduled. Check back later!',
       });
     }
     
-    console.log(`Processing ${todayGames.length} games...`);
+    console.log(`Processing ${todayGames.length} games for ${gameDate}...`);
     
     const results = await Promise.all(todayGames.map((game: any) => processGame(game)));
     
@@ -264,6 +294,7 @@ export async function GET() {
       lastUpdated: new Date().toISOString(),
       gamesAnalyzed: todayGames.length,
       playersAnalyzed: totalPlayers,
+      gameDate,
     });
     
   } catch (error) {
