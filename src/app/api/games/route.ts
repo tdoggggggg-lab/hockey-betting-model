@@ -261,12 +261,24 @@ export async function GET() {
 
     console.log(`📅 Schedule: ${gameWeek.length} days`);
 
+    // Get today's date in ET (NHL uses Eastern Time)
+    const now = new Date();
+    const etDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const todayStr = etDate.toISOString().split('T')[0];
+    console.log(`📅 Today (ET): ${todayStr}`);
+
     const gamesByDate: Record<string, any[]> = {};
     const dates: string[] = [];
 
     for (const day of gameWeek) {
       const dateStr = day.date;
       if (!dateStr) continue;
+      
+      // Skip past dates - only show today and future
+      if (dateStr < todayStr) {
+        console.log(`  Skipping ${dateStr} (past)`);
+        continue;
+      }
 
       dates.push(dateStr);
       gamesByDate[dateStr] = [];
