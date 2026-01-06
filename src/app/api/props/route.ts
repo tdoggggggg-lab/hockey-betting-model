@@ -65,13 +65,38 @@ function poissonAtLeastOne(lambda: number): number {
   return 1 - Math.exp(-lambda);
 }
 
-async function getPlayerStats(teamAbbrev: string): Promise<any[]> {
-  try {
-    const response = await fetch(`https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`);
-    if (!response.ok) return [];
-    const data = await response.json();
-    return data.skaters || [];
-  } catch { return []; }
+// Simple delay function
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function getPlayerStats(teamAbbrev: string, retries = 3): Promise<any[]> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(`https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`, {
+        headers: { 'Accept': 'application/json' },
+      });
+      
+      if (response.status === 429) {
+        // Rate limited - wait and retry
+        console.log(`Rate limited for ${teamAbbrev}, attempt ${attempt}/${retries}`);
+        await delay(1000 * attempt); // Exponential backoff
+        continue;
+      }
+      
+      if (!response.ok) {
+        console.log(`Failed to fetch ${teamAbbrev}: ${response.status}`);
+        return [];
+      }
+      
+      const data = await response.json();
+      return data.skaters || [];
+    } catch (error) {
+      console.log(`Error fetching ${teamAbbrev} (attempt ${attempt}):`, error);
+      if (attempt < retries) {
+        await delay(500 * attempt);
+      }
+    }
+  }
+  return [];
 }
 
 async function processGame(game: any): Promise<{ predictions: PropPrediction[], playerCount: number }> {
@@ -85,10 +110,10 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
     
     console.log(`Processing game: ${awayAbbrev} @ ${homeAbbrev}`);
     
-    const [homePlayers, awayPlayers] = await Promise.all([
-      getPlayerStats(homeAbbrev),
-      getPlayerStats(awayAbbrev),
-    ]);
+    // Fetch with small delay between teams to avoid rate limiting
+    const homePlayers = await getPlayerStats(homeAbbrev);
+    await delay(100);
+    const awayPlayers = await getPlayerStats(awayAbbrev);
     
     let gameTime = 'TBD';
     if (game.startTimeUTC) {
@@ -265,7 +290,14 @@ export async function GET() {
     
     console.log(`Processing ${todayGames.length} games for ${gameDate}...`);
     
-    const results = await Promise.all(todayGames.map((game: any) => processGame(game)));
+    // Process games sequentially with small delays to avoid rate limiting
+    const results = [];
+    for (const game of todayGames) {
+      const result = await processGame(game);
+      results.push(result);
+      // Small delay between games to avoid rate limiting
+      await delay(200);
+    }
     
     const allPredictions: PropPrediction[] = [];
     let totalPlayers = 0;
