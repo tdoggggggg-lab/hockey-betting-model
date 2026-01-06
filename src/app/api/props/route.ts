@@ -296,16 +296,27 @@ export async function GET() {
     const gameWeek = schedData.gameWeek || [];
     console.log(`📅 Schedule has ${gameWeek.length} days`);
     
-    // Find FIRST day with games (might not be today)
+    // Get today's date in ET (NHL uses Eastern Time)
+    const now = new Date();
+    const etDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const todayStr = etDate.toISOString().split('T')[0];
+    console.log(`📅 Today (ET): ${todayStr}`);
+    
+    // Find first day with games that is TODAY or LATER (not yesterday!)
     let todayGames: any[] = [];
     let gameDate = '';
     
     for (const day of gameWeek) {
       console.log(`  Day: ${day.date} has ${day.games?.length || 0} games`);
+      // Skip past dates
+      if (day.date < todayStr) {
+        console.log(`  Skipping ${day.date} (past)`);
+        continue;
+      }
       if (day.games && day.games.length > 0) {
         todayGames = day.games;
         gameDate = day.date;
-        console.log(`  Using ${day.date} with ${todayGames.length} games`);
+        console.log(`  ✅ Using ${day.date} with ${todayGames.length} games`);
         break;
       }
     }
