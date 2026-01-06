@@ -5,7 +5,8 @@ import LeagueTabs from '@/components/LeagueTabs';
 import DateTabs from '@/components/DateTabs';
 import BetTypesTabs from '@/components/BetTypesTabs';
 import GamesTable from '@/components/GamesTable';
-import GoalscorerTable from '@/components/GoalscorerTable';
+import PlayerPropsTable from '@/components/PlayerPropsTable';
+import GoaliePropsTable from '@/components/GoaliePropsTable';
 
 interface Team {
   id: number;
@@ -105,6 +106,87 @@ export default function Home() {
     return date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   };
 
+  // Render content based on active tab
+  const renderContent = () => {
+    switch (activeBetType) {
+      case 'game-lines':
+        return (
+          <>
+            {loading ? (
+              <div className="flex flex-col items-center justify-center py-20">
+                <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
+                <p className="text-slate-400">Loading games...</p>
+              </div>
+            ) : error ? (
+              <div className="text-center py-20">
+                <div className="text-4xl mb-4">⚠️</div>
+                <h3 className="text-xl font-medium text-red-400">{error}</h3>
+                <button 
+                  onClick={() => window.location.reload()}
+                  className="mt-4 px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-500"
+                >
+                  Try Again
+                </button>
+              </div>
+            ) : (
+              <GamesTable 
+                games={todayGames} 
+                dateLabel={getDateLabel(activeDate)} 
+              />
+            )}
+          </>
+        );
+      
+      case 'goalscorer':
+        return (
+          <PlayerPropsTable 
+            propType="goalscorer" 
+            title="Anytime Goalscorer" 
+            statLabel="Exp. Goals" 
+          />
+        );
+      
+      case 'shots':
+        return (
+          <PlayerPropsTable 
+            propType="shots" 
+            title="Shots on Goal" 
+            statLabel="Exp. Shots" 
+          />
+        );
+      
+      case 'points':
+        return (
+          <PlayerPropsTable 
+            propType="points" 
+            title="Player Points" 
+            statLabel="Exp. Points" 
+          />
+        );
+      
+      case 'assists':
+        return (
+          <PlayerPropsTable 
+            propType="assists" 
+            title="Player Assists" 
+            statLabel="Exp. Assists" 
+          />
+        );
+      
+      case 'goalie':
+        return <GoaliePropsTable />;
+      
+      default:
+        return (
+          <div className="text-center py-20">
+            <div className="text-6xl mb-4">🏒</div>
+            <h3 className="text-2xl font-bold text-white mb-2">Coming Soon</h3>
+            <p className="text-slate-400">This feature is under development.</p>
+          </div>
+        );
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950">
       {/* League Tabs */}
@@ -162,50 +244,7 @@ export default function Home() {
 
       {/* Content Area */}
       <div className="max-w-7xl mx-auto py-4">
-        {activeBetType === 'game-lines' ? (
-          // Game Lines Content
-          <>
-            {loading ? (
-              <div className="flex flex-col items-center justify-center py-20">
-                <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500 mb-4"></div>
-                <p className="text-slate-400">Loading games...</p>
-              </div>
-            ) : error ? (
-              <div className="text-center py-20">
-                <div className="text-4xl mb-4">⚠️</div>
-                <h3 className="text-xl font-medium text-red-400">{error}</h3>
-                <button 
-                  onClick={() => window.location.reload()}
-                  className="mt-4 px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-500"
-                >
-                  Try Again
-                </button>
-              </div>
-            ) : (
-              <GamesTable 
-                games={todayGames} 
-                dateLabel={getDateLabel(activeDate)} 
-              />
-            )}
-          </>
-        ) : activeBetType === 'goalscorer' ? (
-          // Goalscorer Content
-          <GoalscorerTable />
-        ) : (
-          // Coming Soon for other tabs
-          <div className="text-center py-20">
-            <div className="text-6xl mb-4">🏗️</div>
-            <h3 className="text-2xl font-bold text-white mb-2">Coming Soon</h3>
-            <p className="text-slate-400">
-              {activeBetType === 'shots' && 'Shots on Goal props are coming soon!'}
-              {activeBetType === 'points' && 'Points props are coming soon!'}
-              {activeBetType === 'assists' && 'Assists props are coming soon!'}
-              {activeBetType === 'goalie' && 'Goalie props are coming soon!'}
-              {activeBetType === 'periods' && 'Period betting is coming soon!'}
-              {activeBetType === 'team-totals' && 'Team totals are coming soon!'}
-            </p>
-          </div>
-        )}
+        {renderContent()}
 
         {/* Info Banner - only show on game lines */}
         {activeBetType === 'game-lines' && (
@@ -217,26 +256,6 @@ export default function Home() {
                 <p className="text-slate-400 text-sm">
                   Our model uses expected goals (xG), Corsi/Fenwick possession metrics, 
                   goalie performance (GSAx), and situational factors. Historical accuracy: 62% on moneyline picks.
-                  <a href="/model" className="text-blue-400 hover:underline ml-1">Learn more →</a>
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* API Status */}
-        {!process.env.NEXT_PUBLIC_HAS_ODDS_KEY && (
-          <div className="mx-4 mt-4 p-4 bg-amber-900/20 border border-amber-700/50 rounded-xl">
-            <div className="flex items-start gap-3">
-              <span className="text-2xl">⚙️</span>
-              <div>
-                <h3 className="font-semibold text-amber-400 mb-1">Setup Required: Odds API</h3>
-                <p className="text-slate-400 text-sm">
-                  To see live betting odds, add your free API key from{' '}
-                  <a href="https://the-odds-api.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
-                    the-odds-api.com
-                  </a>
-                  {' '}to your Vercel environment variables as <code className="bg-slate-800 px-1 rounded">ODDS_API_KEY</code>.
                 </p>
               </div>
             </div>
