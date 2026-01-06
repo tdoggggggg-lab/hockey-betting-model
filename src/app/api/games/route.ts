@@ -1,17 +1,22 @@
 // src/app/api/games/route.ts
-// Game predictions with CACHED LIVE ODDS from The Odds API
-
 import { NextResponse } from 'next/server';
-import { apiCache, CACHE_TTL } from '@/lib/cache';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60;
+export const maxDuration = 30;
 
-// ============ ODDS API INTEGRATION WITH CACHING ============
+// ============ GLOBALS ============
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
-// Team name mapping (Odds API full names → NHL abbreviations)
+// In-memory cache
+let oddsCache: { data: Map<string, any>; timestamp: number } | null = null;
+let standingsCache: { data: any[]; timestamp: number } | null = null;
+
+const ODDS_CACHE_TTL = 7200000; // 2 hours (for 500 credits/month)
+const STANDINGS_CACHE_TTL = 300000; // 5 minutes
+
+// ============ HELPERS ============
+
 const TEAM_NAME_MAP: Record<string, string> = {
   'Anaheim Ducks': 'ANA', 'Boston Bruins': 'BOS', 'Buffalo Sabres': 'BUF',
   'Calgary Flames': 'CGY', 'Carolina Hurricanes': 'CAR', 'Chicago Blackhawks': 'CHI',
@@ -32,98 +37,89 @@ function getTeamAbbrev(fullName: string): string {
 }
 
 function decimalToAmerican(decimal: number): number {
-  if (decimal >= 2.0) {
-    return Math.round((decimal - 1) * 100);
-  } else {
-    return Math.round(-100 / (decimal - 1));
+  if (decimal >= 2.0) return Math.round((decimal - 1) * 100);
+  return Math.round(-100 / (decimal - 1));
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number = 8000): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-interface OddsData {
-  homeMoneyline: number;
-  awayMoneyline: number;
-  homeSpreadOdds: number;
-  awaySpreadOdds: number;
-  totalLine: number;
-  overOdds: number;
-  underOdds: number;
-  bookmaker: string;
-}
+// ============ ODDS API ============
 
-async function fetchOddsFromAPI(): Promise<Map<string, OddsData>> {
-  const CACHE_KEY = 'odds_data';
-  
-  // Check cache first - this is the key optimization!
-  const cached = apiCache.get<Map<string, OddsData>>(CACHE_KEY);
-  if (cached) {
-    const age = apiCache.getAge(CACHE_KEY);
-    console.log(`✅ Using cached odds (${age}s old, ${cached.size} games)`);
-    return cached;
+async function fetchOdds(): Promise<Map<string, any>> {
+  // Check cache first
+  if (oddsCache && Date.now() - oddsCache.timestamp < ODDS_CACHE_TTL) {
+    console.log('✅ Using cached odds');
+    return oddsCache.data;
   }
   
-  const oddsMap = new Map<string, OddsData>();
+  const oddsMap = new Map();
   
   if (!ODDS_API_KEY) {
-    console.log('⚠️ ODDS_API_KEY not set - skipping odds fetch');
+    console.log('⚠️ No ODDS_API_KEY');
     return oddsMap;
   }
-
+  
   try {
     const url = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&bookmakers=draftkings,fanduel`;
     
-    console.log('🔄 Fetching FRESH odds from API...');
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      console.error('❌ Odds API error:', response.status);
-      return oddsMap;
-    }
-
-    const data = await response.json();
+    console.log('🔄 Fetching fresh odds...');
+    const response = await fetchWithTimeout(url, 10000);
     
-    // Log usage - IMPORTANT for monitoring
+    if (!response.ok) {
+      console.log(`❌ Odds API: ${response.status}`);
+      return oddsCache?.data || oddsMap;
+    }
+    
+    const data = await response.json();
     const remaining = response.headers.get('x-requests-remaining');
-    const used = response.headers.get('x-requests-used');
-    console.log(`📊 Odds API: ${data.length} games | Used: ${used} | Remaining: ${remaining}`);
-
+    console.log(`📊 Odds API: ${data.length} games, ${remaining} credits left`);
+    
     for (const game of data) {
       const homeAbbrev = getTeamAbbrev(game.home_team);
       const awayAbbrev = getTeamAbbrev(game.away_team);
       const key = `${awayAbbrev}@${homeAbbrev}`;
-
-      // Get DraftKings odds (or first bookmaker)
-      const dk = game.bookmakers.find((b: any) => b.key === 'draftkings') || game.bookmakers[0];
+      
+      const dk = game.bookmakers?.find((b: any) => b.key === 'draftkings') || game.bookmakers?.[0];
       if (!dk) continue;
-
-      const h2h = dk.markets.find((m: any) => m.key === 'h2h');
-      const spreads = dk.markets.find((m: any) => m.key === 'spreads');
-      const totals = dk.markets.find((m: any) => m.key === 'totals');
-
+      
+      const h2h = dk.markets?.find((m: any) => m.key === 'h2h');
+      const spreads = dk.markets?.find((m: any) => m.key === 'spreads');
+      const totals = dk.markets?.find((m: any) => m.key === 'totals');
+      
       let homeML = 0, awayML = 0;
       if (h2h) {
-        const homeOutcome = h2h.outcomes.find((o: any) => o.name === game.home_team);
-        const awayOutcome = h2h.outcomes.find((o: any) => o.name === game.away_team);
+        const homeOutcome = h2h.outcomes?.find((o: any) => o.name === game.home_team);
+        const awayOutcome = h2h.outcomes?.find((o: any) => o.name === game.away_team);
         homeML = homeOutcome ? decimalToAmerican(homeOutcome.price) : 0;
         awayML = awayOutcome ? decimalToAmerican(awayOutcome.price) : 0;
       }
-
+      
       let homeSpreadOdds = -110, awaySpreadOdds = -110;
       if (spreads) {
-        const homeSpread = spreads.outcomes.find((o: any) => o.name === game.home_team);
-        const awaySpread = spreads.outcomes.find((o: any) => o.name === game.away_team);
+        const homeSpread = spreads.outcomes?.find((o: any) => o.name === game.home_team);
+        const awaySpread = spreads.outcomes?.find((o: any) => o.name === game.away_team);
         homeSpreadOdds = homeSpread ? decimalToAmerican(homeSpread.price) : -110;
         awaySpreadOdds = awaySpread ? decimalToAmerican(awaySpread.price) : -110;
       }
-
+      
       let totalLine = 6, overOdds = -110, underOdds = -110;
       if (totals) {
-        const over = totals.outcomes.find((o: any) => o.name === 'Over');
-        const under = totals.outcomes.find((o: any) => o.name === 'Under');
+        const over = totals.outcomes?.find((o: any) => o.name === 'Over');
+        const under = totals.outcomes?.find((o: any) => o.name === 'Under');
         totalLine = over?.point || 6;
         overOdds = over ? decimalToAmerican(over.price) : -110;
         underOdds = under ? decimalToAmerican(under.price) : -110;
       }
-
+      
       oddsMap.set(key, {
         homeMoneyline: homeML,
         awayMoneyline: awayML,
@@ -135,48 +131,33 @@ async function fetchOddsFromAPI(): Promise<Map<string, OddsData>> {
         bookmaker: dk.title || 'DraftKings',
       });
     }
-
-    // Cache the results for 10 minutes
-    apiCache.set(CACHE_KEY, oddsMap, CACHE_TTL.ODDS);
-    console.log(`💾 Cached odds for ${CACHE_TTL.ODDS}s (${oddsMap.size} games)`);
     
-  } catch (error) {
-    console.error('❌ Failed to fetch odds:', error);
+    // Update cache
+    oddsCache = { data: oddsMap, timestamp: Date.now() };
+    console.log(`💾 Cached ${oddsMap.size} games odds`);
+    
+  } catch (error: any) {
+    console.log(`❌ Odds fetch error: ${error.message}`);
+    return oddsCache?.data || oddsMap;
   }
-
+  
   return oddsMap;
 }
 
-// ============ PREDICTION MODEL ============
+// ============ STANDINGS / TEAM STATS ============
 
-const HOME_ICE_BOOST = 0.045;
-const B2B_PENALTY = 0.073;
-
-interface TeamStats {
-  teamAbbrev: string;
-  gamesPlayed: number;
-  goalsForPerGame: number;
-  goalsAgainstPerGame: number;
-  pointsPct: number;
-}
-
-// Cache for standings data
-let standingsCache: { data: any[]; timestamp: number } | null = null;
-const STANDINGS_TTL = 300000; // 5 minutes
-
-async function getStandingsData(): Promise<any[]> {
-  // Check cache
-  if (standingsCache && Date.now() - standingsCache.timestamp < STANDINGS_TTL) {
+async function getStandings(): Promise<any[]> {
+  if (standingsCache && Date.now() - standingsCache.timestamp < STANDINGS_CACHE_TTL) {
     return standingsCache.data;
   }
   
   try {
-    const res = await fetch('https://api-web.nhle.com/v1/standings/now');
-    if (!res.ok) return standingsCache?.data || [];
-    const data = await res.json();
+    const response = await fetchWithTimeout('https://api-web.nhle.com/v1/standings/now', 8000);
+    if (!response.ok) return standingsCache?.data || [];
+    
+    const data = await response.json();
     const standings = data.standings || [];
     
-    // Update cache
     standingsCache = { data: standings, timestamp: Date.now() };
     return standings;
   } catch {
@@ -184,10 +165,8 @@ async function getStandingsData(): Promise<any[]> {
   }
 }
 
-async function getTeamStats(teamAbbrev: string): Promise<TeamStats | null> {
-  const standings = await getStandingsData();
+function getTeamStats(standings: any[], teamAbbrev: string) {
   const team = standings.find((t: any) => t.teamAbbrev?.default === teamAbbrev);
-  
   if (!team) return null;
   
   const gp = team.gamesPlayed || 1;
@@ -200,130 +179,100 @@ async function getTeamStats(teamAbbrev: string): Promise<TeamStats | null> {
   };
 }
 
-async function isBackToBack(teamAbbrev: string, gameDate: string): Promise<boolean> {
-  try {
-    const res = await fetch(`https://api-web.nhle.com/v1/club-schedule/${teamAbbrev}/week/now`);
-    if (!res.ok) return false;
-    const data = await res.json();
-    const yesterday = new Date(gameDate);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toISOString().split('T')[0];
-    return (data.games || []).some((g: any) => g.gameDate === yesterdayStr);
-  } catch { return false; }
-}
+// ============ PREDICTION MODEL ============
 
-function predictGame(homeStats: TeamStats, awayStats: TeamStats, homeB2B: boolean, awayB2B: boolean) {
+const HOME_ICE_BOOST = 0.045;
+const B2B_PENALTY = 0.073;
+
+function predictGame(homeStats: any, awayStats: any) {
+  if (!homeStats || !awayStats) {
+    return { homeWinProb: 0.5, predictedTotal: 5.5, confidence: 0.5 };
+  }
+  
   const homeGD = homeStats.goalsForPerGame - homeStats.goalsAgainstPerGame;
   const awayGD = awayStats.goalsForPerGame - awayStats.goalsAgainstPerGame;
   const gdAdvantage = homeGD - awayGD;
-
+  
   let baseProb = 1 / (1 + Math.exp(-0.18 * gdAdvantage * 10));
   baseProb = 0.5 + (baseProb - 0.5) * 0.75;
-
-  let restAdj = 0;
-  if (homeB2B && !awayB2B) restAdj = -B2B_PENALTY;
-  else if (!homeB2B && awayB2B) restAdj = B2B_PENALTY;
-
+  
   const ptsPctAdj = (homeStats.pointsPct - awayStats.pointsPct) * 0.15;
-
-  let homeWinProb = baseProb + HOME_ICE_BOOST + restAdj + ptsPctAdj;
+  
+  let homeWinProb = baseProb + HOME_ICE_BOOST + ptsPctAdj;
   homeWinProb = Math.max(0.28, Math.min(0.72, homeWinProb));
-
+  
   const predictedTotal = homeStats.goalsForPerGame + awayStats.goalsForPerGame;
-
+  
   let confidence = 0.45;
   if (homeStats.gamesPlayed >= 20 && awayStats.gamesPlayed >= 20) confidence += 0.15;
   if (Math.abs(homeWinProb - 0.5) > 0.12) confidence += 0.1;
-  if (Math.abs(restAdj) > 0) confidence += 0.1;
   confidence = Math.min(0.80, confidence);
-
+  
   return { homeWinProb, predictedTotal, confidence };
 }
 
 // ============ MAIN HANDLER ============
 
 export async function GET() {
+  const startTime = Date.now();
+  
   try {
-    console.log('🏒 Games API request started');
+    console.log('🏒 Games API started');
     
-    // Fetch schedule and odds in parallel
-    const [schedRes, oddsMap] = await Promise.all([
-      fetch('https://api-web.nhle.com/v1/schedule/now'),
-      fetchOddsFromAPI(),
+    // Fetch schedule, standings, and odds in parallel
+    const [schedRes, standings, oddsMap] = await Promise.all([
+      fetchWithTimeout('https://api-web.nhle.com/v1/schedule/now', 8000).catch(() => null),
+      getStandings(),
+      fetchOdds(),
     ]);
-
-    if (!schedRes.ok) {
-      return NextResponse.json({ gamesByDate: {}, dates: [], error: 'Schedule API error' });
+    
+    if (!schedRes?.ok) {
+      return NextResponse.json({
+        gamesByDate: {},
+        dates: [],
+        error: 'Schedule unavailable. Please refresh.',
+      });
     }
-
+    
     const schedData = await schedRes.json();
     const gameWeek = schedData.gameWeek || [];
-
-    console.log(`📅 Schedule: ${gameWeek.length} days`);
-
-    // Get today's date in ET (NHL uses Eastern Time)
+    
+    // Get today in ET
     const now = new Date();
     const etDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
     const todayStr = etDate.toISOString().split('T')[0];
-    console.log(`📅 Today (ET): ${todayStr}`);
-
+    
+    console.log(`📅 Today (ET): ${todayStr}, Schedule has ${gameWeek.length} days`);
+    
     const gamesByDate: Record<string, any[]> = {};
     const dates: string[] = [];
-
+    
     for (const day of gameWeek) {
       const dateStr = day.date;
-      if (!dateStr) continue;
+      if (!dateStr || dateStr < todayStr) continue;
       
-      // Skip past dates - only show today and future
-      if (dateStr < todayStr) {
-        console.log(`  Skipping ${dateStr} (past)`);
-        continue;
-      }
-
       dates.push(dateStr);
       gamesByDate[dateStr] = [];
-
+      
       for (const game of day.games || []) {
         const homeAbbrev = game.homeTeam?.abbrev;
         const awayAbbrev = game.awayTeam?.abbrev;
         if (!homeAbbrev || !awayAbbrev) continue;
-
-        // Get prediction
-        const [homeStats, awayStats, homeB2B, awayB2B] = await Promise.all([
-          getTeamStats(homeAbbrev),
-          getTeamStats(awayAbbrev),
-          isBackToBack(homeAbbrev, dateStr),
-          isBackToBack(awayAbbrev, dateStr),
-        ]);
-
-        let prediction = {
-          homeWinProbability: 0.5,
-          awayWinProbability: 0.5,
-          predictedTotal: 5.5,
-          confidence: 0.5,
-        };
-
-        if (homeStats && awayStats) {
-          const pred = predictGame(homeStats, awayStats, homeB2B, awayB2B);
-          prediction = {
-            homeWinProbability: pred.homeWinProb,
-            awayWinProbability: 1 - pred.homeWinProb,
-            predictedTotal: pred.predictedTotal,
-            confidence: pred.confidence,
-          };
-        }
-
-        // Get odds for this game
+        
+        const homeStats = getTeamStats(standings, homeAbbrev);
+        const awayStats = getTeamStats(standings, awayAbbrev);
+        const pred = predictGame(homeStats, awayStats);
+        
         const oddsKey = `${awayAbbrev}@${homeAbbrev}`;
         const odds = oddsMap.get(oddsKey);
-
+        
         const getTeamName = (team: any) => {
           if (team?.placeName?.default && team?.commonName?.default) {
             return `${team.placeName.default} ${team.commonName.default}`;
           }
           return team?.abbrev || 'Unknown';
         };
-
+        
         gamesByDate[dateStr].push({
           id: `${game.id}`,
           homeTeam: {
@@ -338,7 +287,12 @@ export async function GET() {
           },
           startTime: game.startTimeUTC || '',
           status: game.gameState === 'LIVE' ? 'live' : game.gameState === 'FINAL' ? 'final' : 'scheduled',
-          prediction,
+          prediction: {
+            homeWinProbability: pred.homeWinProb,
+            awayWinProbability: 1 - pred.homeWinProb,
+            predictedTotal: pred.predictedTotal,
+            confidence: pred.confidence,
+          },
           odds: odds ? [{
             bookmaker: odds.bookmaker,
             homeMoneyline: odds.homeMoneyline,
@@ -353,19 +307,24 @@ export async function GET() {
         });
       }
     }
-
-    const totalGames = Object.values(gamesByDate).reduce((sum, games) => sum + games.length, 0);
-    console.log(`✅ Games API complete: ${totalGames} games, ${oddsMap.size} with odds`);
-
+    
+    const totalGames = Object.values(gamesByDate).reduce((sum, g) => sum + g.length, 0);
+    console.log(`✅ Games API: ${totalGames} games in ${Date.now() - startTime}ms`);
+    
     return NextResponse.json({
       gamesByDate,
       dates,
       lastUpdated: new Date().toISOString(),
       oddsSource: oddsMap.size > 0 ? 'live' : 'none',
+      fetchTimeMs: Date.now() - startTime,
     });
-
-  } catch (error) {
+    
+  } catch (error: any) {
     console.error('❌ Games API error:', error);
-    return NextResponse.json({ gamesByDate: {}, dates: [], error: 'Failed to fetch games' });
+    return NextResponse.json({
+      gamesByDate: {},
+      dates: [],
+      error: 'Failed to fetch games. Please refresh.',
+    });
   }
 }
