@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { apiCache, CACHE_TTL } from '@/lib/cache';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -68,7 +69,18 @@ function poissonAtLeastOne(lambda: number): number {
 // Simple delay function
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function getPlayerStats(teamAbbrev: string, retries = 3): Promise<any[]> {
+// Cache for player stats by team
+const playerStatsCache: Map<string, { data: any[]; timestamp: number }> = new Map();
+const PLAYER_STATS_TTL = 600000; // 10 minutes
+
+async function getPlayerStats(teamAbbrev: string, retries = 2): Promise<any[]> {
+  // Check cache first
+  const cached = playerStatsCache.get(teamAbbrev);
+  if (cached && Date.now() - cached.timestamp < PLAYER_STATS_TTL) {
+    console.log(`  ✅ Using cached stats for ${teamAbbrev}`);
+    return cached.data;
+  }
+  
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const response = await fetch(`https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`, {
@@ -76,27 +88,32 @@ async function getPlayerStats(teamAbbrev: string, retries = 3): Promise<any[]> {
       });
       
       if (response.status === 429) {
-        // Rate limited - wait and retry
-        console.log(`Rate limited for ${teamAbbrev}, attempt ${attempt}/${retries}`);
-        await delay(1000 * attempt); // Exponential backoff
+        console.log(`  ⚠️ Rate limited for ${teamAbbrev}, attempt ${attempt}/${retries}`);
+        await delay(1000 * attempt);
         continue;
       }
       
       if (!response.ok) {
-        console.log(`Failed to fetch ${teamAbbrev}: ${response.status}`);
-        return [];
+        console.log(`  ❌ Failed to fetch ${teamAbbrev}: ${response.status}`);
+        return cached?.data || [];
       }
       
       const data = await response.json();
-      return data.skaters || [];
+      const skaters = data.skaters || [];
+      
+      // Cache the results
+      playerStatsCache.set(teamAbbrev, { data: skaters, timestamp: Date.now() });
+      console.log(`  💾 Cached ${skaters.length} players for ${teamAbbrev}`);
+      
+      return skaters;
     } catch (error) {
-      console.log(`Error fetching ${teamAbbrev} (attempt ${attempt}):`, error);
+      console.log(`  ❌ Error fetching ${teamAbbrev} (attempt ${attempt}):`, error);
       if (attempt < retries) {
         await delay(500 * attempt);
       }
     }
   }
-  return [];
+  return cached?.data || [];
 }
 
 async function processGame(game: any): Promise<{ predictions: PropPrediction[], playerCount: number }> {
@@ -108,7 +125,7 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
     const awayAbbrev = game.awayTeam?.abbrev;
     if (!homeAbbrev || !awayAbbrev) return { predictions, playerCount };
     
-    console.log(`Processing game: ${awayAbbrev} @ ${homeAbbrev}`);
+    console.log(`🏒 Processing game: ${awayAbbrev} @ ${homeAbbrev}`);
     
     // Fetch with small delay between teams to avoid rate limiting
     const homePlayers = await getPlayerStats(homeAbbrev);
@@ -214,16 +231,28 @@ async function processGame(game: any): Promise<{ predictions: PropPrediction[], 
       playerCount++;
     }
     
-    console.log(`  Generated ${predictions.length} predictions`);
+    console.log(`  ✅ Generated ${predictions.length} predictions`);
   } catch (error) {
-    console.error('Error processing game:', error);
+    console.error('  ❌ Error processing game:', error);
   }
   
   return { predictions, playerCount };
 }
 
 export async function GET() {
+  const CACHE_KEY = 'props_predictions';
+  
+  // Check cache first
+  const cached = apiCache.get<any>(CACHE_KEY);
+  if (cached) {
+    const age = apiCache.getAge(CACHE_KEY);
+    console.log(`✅ Using cached props (${age}s old)`);
+    return NextResponse.json(cached);
+  }
+  
   try {
+    console.log('🔄 Generating fresh props predictions...');
+    
     // Try multiple schedule endpoints for reliability
     let schedData: any = null;
     
@@ -255,16 +284,17 @@ export async function GET() {
     }
     
     if (!schedData || !schedData.gameWeek) {
-      console.log('All schedule endpoints failed');
-      return NextResponse.json({
+      console.log('❌ All schedule endpoints failed');
+      const emptyResponse = {
         predictions: [], valueBets: [], lastUpdated: new Date().toISOString(),
         gamesAnalyzed: 0, playersAnalyzed: 0, 
         message: 'No games scheduled today. Check back tomorrow!',
-      });
+      };
+      return NextResponse.json(emptyResponse);
     }
     
     const gameWeek = schedData.gameWeek || [];
-    console.log(`Props API: Schedule has ${gameWeek.length} days`);
+    console.log(`📅 Schedule has ${gameWeek.length} days`);
     
     // Find FIRST day with games (might not be today)
     let todayGames: any[] = [];
@@ -281,14 +311,15 @@ export async function GET() {
     }
     
     if (!todayGames.length) {
-      return NextResponse.json({
+      const emptyResponse = {
         predictions: [], valueBets: [], lastUpdated: new Date().toISOString(),
         gamesAnalyzed: 0, playersAnalyzed: 0,
         message: 'No games scheduled. Check back later!',
-      });
+      };
+      return NextResponse.json(emptyResponse);
     }
     
-    console.log(`Processing ${todayGames.length} games for ${gameDate}...`);
+    console.log(`🏒 Processing ${todayGames.length} games for ${gameDate}...`);
     
     // Process games sequentially with small delays to avoid rate limiting
     const results = [];
@@ -307,7 +338,7 @@ export async function GET() {
       totalPlayers += result.playerCount;
     }
     
-    console.log(`Total: ${allPredictions.length} predictions from ${totalPlayers} players`);
+    console.log(`📊 Total: ${allPredictions.length} predictions from ${totalPlayers} players`);
     
     allPredictions.sort((a, b) => b.probability - a.probability);
     
@@ -320,17 +351,23 @@ export async function GET() {
     const topPickIds = new Set(topPicks.map(p => p.playerId));
     const markedPredictions = allPredictions.map(p => ({ ...p, isValueBet: topPickIds.has(p.playerId) }));
     
-    return NextResponse.json({
+    const response = {
       predictions: markedPredictions,
       valueBets: topPicks,
       lastUpdated: new Date().toISOString(),
       gamesAnalyzed: todayGames.length,
       playersAnalyzed: totalPlayers,
       gameDate,
-    });
+    };
+    
+    // Cache the results for 5 minutes
+    apiCache.set(CACHE_KEY, response, CACHE_TTL.PROPS);
+    console.log(`💾 Cached props for ${CACHE_TTL.PROPS}s`);
+    
+    return NextResponse.json(response);
     
   } catch (error) {
-    console.error('Error in props API:', error);
+    console.error('❌ Error in props API:', error);
     return NextResponse.json({
       predictions: [], valueBets: [], lastUpdated: new Date().toISOString(),
       gamesAnalyzed: 0, playersAnalyzed: 0, error: 'Failed to generate predictions'
