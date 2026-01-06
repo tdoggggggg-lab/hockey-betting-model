@@ -46,10 +46,13 @@ class SimpleCache {
 export const apiCache = new SimpleCache();
 
 // Cache TTL constants (in seconds)
+// OPTIMIZED FOR 500 API CREDITS/MONTH:
+// - 500 credits ÷ 30 days = 16.6/day
+// - Target: 12 calls/day = 2 hour cache for odds
 export const CACHE_TTL = {
-  ODDS: 600,        // 10 minutes for odds (saves API calls!)
-  SCHEDULE: 300,    // 5 minutes for schedule
-  STANDINGS: 300,   // 5 minutes for standings  
-  PLAYER_STATS: 600, // 10 minutes for player stats
+  ODDS: 7200,       // 2 HOURS for odds (500 credits/month = ~12 calls/day max)
+  SCHEDULE: 300,    // 5 minutes for schedule (free NHL API)
+  STANDINGS: 300,   // 5 minutes for standings (free NHL API)
+  PLAYER_STATS: 600, // 10 minutes for player stats (free NHL API)
   PROPS: 300,       // 5 minutes for props predictions
 };
