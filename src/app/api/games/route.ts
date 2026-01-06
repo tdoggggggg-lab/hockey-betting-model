@@ -1,12 +1,13 @@
 // src/app/api/games/route.ts
-// Game predictions with LIVE ODDS from The Odds API
+// Game predictions with CACHED LIVE ODDS from The Odds API
 
 import { NextResponse } from 'next/server';
+import { apiCache, CACHE_TTL } from '@/lib/cache';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
-// ============ ODDS API INTEGRATION ============
+// ============ ODDS API INTEGRATION WITH CACHING ============
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
@@ -38,31 +39,52 @@ function decimalToAmerican(decimal: number): number {
   }
 }
 
-async function fetchOddsFromAPI(): Promise<Map<string, any>> {
-  const oddsMap = new Map();
+interface OddsData {
+  homeMoneyline: number;
+  awayMoneyline: number;
+  homeSpreadOdds: number;
+  awaySpreadOdds: number;
+  totalLine: number;
+  overOdds: number;
+  underOdds: number;
+  bookmaker: string;
+}
+
+async function fetchOddsFromAPI(): Promise<Map<string, OddsData>> {
+  const CACHE_KEY = 'odds_data';
+  
+  // Check cache first - this is the key optimization!
+  const cached = apiCache.get<Map<string, OddsData>>(CACHE_KEY);
+  if (cached) {
+    const age = apiCache.getAge(CACHE_KEY);
+    console.log(`✅ Using cached odds (${age}s old, ${cached.size} games)`);
+    return cached;
+  }
+  
+  const oddsMap = new Map<string, OddsData>();
   
   if (!ODDS_API_KEY) {
-    console.log('ODDS_API_KEY not set - skipping odds fetch');
+    console.log('⚠️ ODDS_API_KEY not set - skipping odds fetch');
     return oddsMap;
   }
 
   try {
-    const url = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&bookmakers=draftkings,fanduel,betmgm`;
+    const url = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&bookmakers=draftkings,fanduel`;
     
-    console.log('Fetching live odds...');
-    const response = await fetch(url, { next: { revalidate: 300 } });
+    console.log('🔄 Fetching FRESH odds from API...');
+    const response = await fetch(url);
 
     if (!response.ok) {
-      console.error('Odds API error:', response.status);
+      console.error('❌ Odds API error:', response.status);
       return oddsMap;
     }
 
     const data = await response.json();
-    console.log(`Odds API: ${data.length} games returned`);
     
-    // Log usage
+    // Log usage - IMPORTANT for monitoring
     const remaining = response.headers.get('x-requests-remaining');
-    console.log(`Odds API requests remaining: ${remaining}`);
+    const used = response.headers.get('x-requests-used');
+    console.log(`📊 Odds API: ${data.length} games | Used: ${used} | Remaining: ${remaining}`);
 
     for (const game of data) {
       const homeAbbrev = getTeamAbbrev(game.home_team);
@@ -114,9 +136,12 @@ async function fetchOddsFromAPI(): Promise<Map<string, any>> {
       });
     }
 
-    console.log(`Parsed odds for ${oddsMap.size} games`);
+    // Cache the results for 10 minutes
+    apiCache.set(CACHE_KEY, oddsMap, CACHE_TTL.ODDS);
+    console.log(`💾 Cached odds for ${CACHE_TTL.ODDS}s (${oddsMap.size} games)`);
+    
   } catch (error) {
-    console.error('Failed to fetch odds:', error);
+    console.error('❌ Failed to fetch odds:', error);
   }
 
   return oddsMap;
@@ -135,24 +160,44 @@ interface TeamStats {
   pointsPct: number;
 }
 
-async function getTeamStats(teamAbbrev: string): Promise<TeamStats | null> {
+// Cache for standings data
+let standingsCache: { data: any[]; timestamp: number } | null = null;
+const STANDINGS_TTL = 300000; // 5 minutes
+
+async function getStandingsData(): Promise<any[]> {
+  // Check cache
+  if (standingsCache && Date.now() - standingsCache.timestamp < STANDINGS_TTL) {
+    return standingsCache.data;
+  }
+  
   try {
     const res = await fetch('https://api-web.nhle.com/v1/standings/now');
-    if (!res.ok) return null;
+    if (!res.ok) return standingsCache?.data || [];
     const data = await res.json();
-    const team = (data.standings || []).find(
-      (t: any) => t.teamAbbrev?.default === teamAbbrev
-    );
-    if (!team) return null;
-    const gp = team.gamesPlayed || 1;
-    return {
-      teamAbbrev,
-      gamesPlayed: gp,
-      goalsForPerGame: (team.goalFor || 0) / gp,
-      goalsAgainstPerGame: (team.goalAgainst || 0) / gp,
-      pointsPct: (team.points || 0) / (gp * 2),
-    };
-  } catch { return null; }
+    const standings = data.standings || [];
+    
+    // Update cache
+    standingsCache = { data: standings, timestamp: Date.now() };
+    return standings;
+  } catch {
+    return standingsCache?.data || [];
+  }
+}
+
+async function getTeamStats(teamAbbrev: string): Promise<TeamStats | null> {
+  const standings = await getStandingsData();
+  const team = standings.find((t: any) => t.teamAbbrev?.default === teamAbbrev);
+  
+  if (!team) return null;
+  
+  const gp = team.gamesPlayed || 1;
+  return {
+    teamAbbrev,
+    gamesPlayed: gp,
+    goalsForPerGame: (team.goalFor || 0) / gp,
+    goalsAgainstPerGame: (team.goalAgainst || 0) / gp,
+    pointsPct: (team.points || 0) / (gp * 2),
+  };
 }
 
 async function isBackToBack(teamAbbrev: string, gameDate: string): Promise<boolean> {
@@ -199,6 +244,8 @@ function predictGame(homeStats: TeamStats, awayStats: TeamStats, homeB2B: boolea
 
 export async function GET() {
   try {
+    console.log('🏒 Games API request started');
+    
     // Fetch schedule and odds in parallel
     const [schedRes, oddsMap] = await Promise.all([
       fetch('https://api-web.nhle.com/v1/schedule/now'),
@@ -212,7 +259,7 @@ export async function GET() {
     const schedData = await schedRes.json();
     const gameWeek = schedData.gameWeek || [];
 
-    console.log(`Schedule: ${gameWeek.length} days`);
+    console.log(`📅 Schedule: ${gameWeek.length} days`);
 
     const gamesByDate: Record<string, any[]> = {};
     const dates: string[] = [];
@@ -295,14 +342,18 @@ export async function GET() {
       }
     }
 
+    const totalGames = Object.values(gamesByDate).reduce((sum, games) => sum + games.length, 0);
+    console.log(`✅ Games API complete: ${totalGames} games, ${oddsMap.size} with odds`);
+
     return NextResponse.json({
       gamesByDate,
       dates,
       lastUpdated: new Date().toISOString(),
+      oddsSource: oddsMap.size > 0 ? 'live' : 'none',
     });
 
   } catch (error) {
-    console.error('Games API error:', error);
+    console.error('❌ Games API error:', error);
     return NextResponse.json({ gamesByDate: {}, dates: [], error: 'Failed to fetch games' });
   }
 }
