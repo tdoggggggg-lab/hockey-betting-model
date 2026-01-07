@@ -467,9 +467,9 @@ export async function GET(request: Request) {
   try {
     console.log(`🏒 Props API started (type: ${propType})`);
     
-    // Refresh injury cache (will use cached if fresh)
+    // Refresh injury cache and get injured names (MUST await - it's async now!)
     await refreshInjuryCache().catch(e => console.log('⚠️ Injury refresh error:', e.message));
-    const injuredNames = getInjuredPlayerNames();
+    const injuredNames = await getInjuredPlayerNames();
     console.log(`🏥 ${injuredNames.size} injured players will be filtered out`);
     
     // Debug: log some injured names
