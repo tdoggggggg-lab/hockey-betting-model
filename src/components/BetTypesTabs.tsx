@@ -12,6 +12,9 @@ const betTypes = [
   { id: 'points', label: 'POINTS' },
   { id: 'assists', label: 'ASSISTS' },
   { id: 'goalie', label: 'GOALIE PROPS' },
+  { id: 'futures', label: 'FUTURES' },
+  { id: 'awards', label: 'AWARDS' },
+  { id: 'playoffs', label: 'PLAYOFFS' },
 ];
 
 export default function BetTypesTabs({ activeType, onTypeChange }: BetTypesTabsProps) {
