@@ -776,7 +776,9 @@ export function getCacheStatus() {
   return {
     lastUpdate: new Date(injuryCache.timestamp).toISOString(),
     teamsWithInjuries: injuryCache.injuries.size,
-    totalInjuries, starPlayersOut,
+    totalInjuries, 
+    starPlayersOut,
+    filteredFromProps: Array.from(injuryCache.allInjuredNames),  // All players filtered from props
     playersReturning: Array.from(injuryCache.returningPlayers.values()).map(p => `${p.playerName} (game ${p.gamesSinceReturn})`),
     teamsWithHighConcentration,
   };
