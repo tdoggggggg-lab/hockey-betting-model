@@ -30,7 +30,7 @@ export async function GET(request: Request) {
     await refreshInjuryCache();
     
     const status = getCacheStatus();
-    const injuredNames = getInjuredPlayerNames();
+    const injuredNames = await getInjuredPlayerNames();
     
     // Log all injured players for debugging
     console.log(`✅ Injury cron complete in ${Date.now() - startTime}ms`);
