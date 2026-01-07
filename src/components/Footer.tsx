@@ -24,21 +24,14 @@ export default function Footer() {
         </div>
 
         {/* Links */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-8 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-8 mb-8">
           <div>
             <h3 className="text-white font-semibold mb-3">Predictions</h3>
             <ul className="space-y-2">
-              <li><Link href="/" className="text-slate-400 hover:text-white text-sm">Today&apos;s Games</Link></li>
-              <li><Link href="/props" className="text-slate-400 hover:text-white text-sm">Player Props</Link></li>
-              <li><Link href="/futures" className="text-slate-400 hover:text-white text-sm">Futures</Link></li>
-            </ul>
-          </div>
-          <div>
-            <h3 className="text-white font-semibold mb-3">Leagues</h3>
-            <ul className="space-y-2">
-              <li><Link href="/?league=nhl" className="text-slate-400 hover:text-white text-sm">NHL</Link></li>
-              <li><Link href="/?league=4nations" className="text-slate-400 hover:text-white text-sm">4 Nations</Link></li>
-              <li><Link href="/?league=olympics" className="text-slate-400 hover:text-white text-sm">Olympics</Link></li>
+              <li><Link href="/" className="text-slate-400 hover:text-white text-sm">Game Lines</Link></li>
+              <li><Link href="/?tab=goalscorer" className="text-slate-400 hover:text-white text-sm">Player Props</Link></li>
+              <li><Link href="/?tab=goalie" className="text-slate-400 hover:text-white text-sm">Goalie Props</Link></li>
+              <li><Link href="/?tab=futures" className="text-slate-400 hover:text-white text-sm">Futures</Link></li>
             </ul>
           </div>
           <div>
