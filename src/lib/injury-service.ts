@@ -652,7 +652,13 @@ export async function isPlayerInjured(playerName: string): Promise<boolean> {
   return injuryCache.allInjuredNames.has(normalizePlayerName(playerName));
 }
 
-export function getInjuredPlayerNames(): Set<string> { return injuryCache.allInjuredNames; }
+// IMPORTANT: This is now ASYNC to ensure cache is fresh!
+export async function getInjuredPlayerNames(): Promise<Set<string>> {
+  if (Date.now() - injuryCache.timestamp > CACHE_TTL) {
+    await refreshInjuryCache();
+  }
+  return injuryCache.allInjuredNames;
+}
 
 export function getTeamStarConcentration(teamAbbrev: string): StarConcentration | null {
   return injuryCache.teamStarConcentration.get(teamAbbrev) || null;
