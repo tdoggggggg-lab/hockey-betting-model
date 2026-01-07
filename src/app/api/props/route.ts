@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { isPlayerInjured, getPlayerPropsAdjustment, refreshInjuryCache, getInjuredPlayerNames } from '@/lib/injury-service';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -25,6 +26,7 @@ interface PropPrediction {
     under: number;
     line: number;
   };
+  injuryNote?: string;  // e.g., "Linemate injured (-25% production)"
 }
 
 interface GoaliePrediction {
@@ -259,7 +261,7 @@ async function fetchPlayerPropsOdds(propType: string): Promise<Map<string, any>>
 
 // ============ PROCESS PLAYERS ============
 
-function processSkaterProps(
+async function processSkaterProps(
   players: any[],
   teamAbbrev: string,
   teamName: string,
@@ -268,14 +270,22 @@ function processSkaterProps(
   gameTime: string,
   isHome: boolean,
   propType: string,
-  bookOddsMap: Map<string, any>
-): PropPrediction[] {
+  bookOddsMap: Map<string, any>,
+  injuredNames: Set<string>
+): Promise<PropPrediction[]> {
   const predictions: PropPrediction[] = [];
   
   for (const player of players) {
     try {
       const name = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
       if (!name) continue;
+      
+      // Skip injured players
+      const normalizedName = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      if (injuredNames.has(normalizedName)) {
+        console.log(`🏥 Skipping injured player: ${name}`);
+        continue;
+      }
       
       const gamesPlayed = player.gamesPlayed || 0;
       if (gamesPlayed < 10) continue;
@@ -307,9 +317,13 @@ function processSkaterProps(
           break;
       }
       
-      // Adjustments
+      // Get injury adjustment for this player (linemate effects, line shuffling)
+      const injuryAdj = await getPlayerPropsAdjustment(name, teamAbbrev);
+      
+      // Apply adjustments
       const homeAwayAdj = isHome ? 1.05 : 0.95;
-      const finalLambda = baseLambda * homeAwayAdj;
+      const linemateAdj = injuryAdj.productionMultiplier; // e.g., 0.75 if linemate injured
+      const finalLambda = baseLambda * homeAwayAdj * linemateAdj;
       
       // Calculate probability
       let probability: number;
@@ -319,13 +333,14 @@ function processSkaterProps(
         probability = poissonOver(finalLambda, line);
       }
       
-      // Confidence
+      // Confidence (reduce if affected by injuries)
       let confidence = 0.3;
       if (ELITE_SCORERS.has(name)) confidence += 0.35;
       else if (baseLambda >= 0.35) confidence += 0.25;
       else if (baseLambda >= 0.20) confidence += 0.15;
       if (gamesPlayed >= 30) confidence += 0.15;
-      confidence = Math.min(0.95, confidence);
+      if (injuryAdj.reason) confidence -= 0.1; // Less confident when linemate injured
+      confidence = Math.max(0.2, Math.min(0.95, confidence));
       
       // Get book odds
       const bookKey = name.toLowerCase().trim();
@@ -347,6 +362,7 @@ function processSkaterProps(
         confidence,
         isValueBet: false,
         bookOdds: bookOdds || undefined,
+        injuryNote: injuryAdj.reason || undefined,
       });
     } catch (e) {
       // Skip problematic players
@@ -444,6 +460,11 @@ export async function GET(request: Request) {
   
   try {
     console.log(`🏒 Props API started (type: ${propType})`);
+    
+    // Refresh injury cache (will use cached if fresh)
+    await refreshInjuryCache().catch(e => console.log('⚠️ Injury refresh error:', e.message));
+    const injuredNames = getInjuredPlayerNames();
+    console.log(`🏥 ${injuredNames.size} injured players will be filtered out`);
     
     // Get schedule
     let schedData: any = null;
@@ -628,16 +649,16 @@ export async function GET(request: Request) {
         const homePlayers = teamStatsMap.get(homeAbbrev) || [];
         const awayPlayers = teamStatsMap.get(awayAbbrev) || [];
         
-        const homePreds = processSkaterProps(
+        const homePreds = await processSkaterProps(
           homePlayers, homeAbbrev, getTeamName(game.homeTeam),
           awayAbbrev, getTeamName(game.awayTeam), gameTime, true,
-          propType, bookOddsMap
+          propType, bookOddsMap, injuredNames
         );
         
-        const awayPreds = processSkaterProps(
+        const awayPreds = await processSkaterProps(
           awayPlayers, awayAbbrev, getTeamName(game.awayTeam),
           homeAbbrev, getTeamName(game.homeTeam), gameTime, false,
-          propType, bookOddsMap
+          propType, bookOddsMap, injuredNames
         );
         
         allPredictions.push(...homePreds, ...awayPreds);
