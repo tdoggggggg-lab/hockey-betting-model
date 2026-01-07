@@ -280,8 +280,14 @@ async function processSkaterProps(
       const name = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
       if (!name) continue;
       
-      // Skip injured players
-      const normalizedName = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+      // Skip injured players - normalize EXACTLY like injury-service.ts does
+      const normalizedName = name
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/\s+(jr|sr|ii|iii|iv)\.?$/i, '')
+        .replace(/[^a-z\s-]/g, '')
+        .trim();
       if (injuredNames.has(normalizedName)) {
         console.log(`🏥 Skipping injured player: ${name}`);
         continue;
@@ -465,6 +471,14 @@ export async function GET(request: Request) {
     await refreshInjuryCache().catch(e => console.log('⚠️ Injury refresh error:', e.message));
     const injuredNames = getInjuredPlayerNames();
     console.log(`🏥 ${injuredNames.size} injured players will be filtered out`);
+    
+    // Debug: log some injured names
+    if (injuredNames.size > 0) {
+      const sampleNames = Array.from(injuredNames).slice(0, 5);
+      console.log(`🏥 Sample injured: ${sampleNames.join(', ')}`);
+    } else {
+      console.log('⚠️ WARNING: No injured players in cache - filter may not work!');
+    }
     
     // Get schedule
     let schedData: any = null;
