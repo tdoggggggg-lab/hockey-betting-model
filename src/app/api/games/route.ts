@@ -1,5 +1,6 @@
 // src/app/api/games/route.ts
 import { NextResponse } from 'next/server';
+import { getGamePredictionAdjustments, refreshInjuryCache } from '@/lib/injury-service';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
@@ -182,11 +183,62 @@ function getTeamStats(standings: any[], teamAbbrev: string) {
 // ============ PREDICTION MODEL ============
 
 const HOME_ICE_BOOST = 0.045;
-const B2B_PENALTY = 0.073;
+const B2B_PENALTY = 0.05;  // 5% base penalty for back-to-back
 
-function predictGame(homeStats: any, awayStats: any) {
+interface InjuryAdjustments {
+  homeWinProbAdjustment: number;
+  awayWinProbAdjustment: number;
+  homePPAdjustment: number;
+  awayPPAdjustment: number;
+  homePKAdjustment: number;
+  awayPKAdjustment: number;
+  expectedTotalAdjustment: number;
+  homeInjurySummary: string;
+  awayInjurySummary: string;
+  homeStarsOut: string[];
+  awayStarsOut: string[];
+  homeGoalieSituation: string;
+  awayGoalieSituation: string;
+  compoundingWarning: string;
+}
+
+// Track which teams played yesterday for B2B detection
+let yesterdayGamesCache: { teams: Set<string>; date: string } | null = null;
+
+async function getYesterdayTeams(gameWeek: any[]): Promise<Set<string>> {
+  const now = new Date();
+  const etDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  etDate.setDate(etDate.getDate() - 1);
+  const yesterdayStr = etDate.toISOString().split('T')[0];
+  
+  if (yesterdayGamesCache?.date === yesterdayStr) {
+    return yesterdayGamesCache.teams;
+  }
+  
+  const teams = new Set<string>();
+  for (const day of gameWeek) {
+    if (day.date === yesterdayStr) {
+      for (const game of day.games || []) {
+        if (game.homeTeam?.abbrev) teams.add(game.homeTeam.abbrev);
+        if (game.awayTeam?.abbrev) teams.add(game.awayTeam.abbrev);
+      }
+      break;
+    }
+  }
+  
+  yesterdayGamesCache = { teams, date: yesterdayStr };
+  return teams;
+}
+
+function predictGame(
+  homeStats: any, 
+  awayStats: any, 
+  injuryAdj: InjuryAdjustments | null,
+  isHomeB2B: boolean,
+  isAwayB2B: boolean
+) {
   if (!homeStats || !awayStats) {
-    return { homeWinProb: 0.5, predictedTotal: 5.5, confidence: 0.5 };
+    return { homeWinProb: 0.5, predictedTotal: 5.5, confidence: 0.5, injuryImpact: null };
   }
   
   const homeGD = homeStats.goalsForPerGame - homeStats.goalsAgainstPerGame;
@@ -199,16 +251,57 @@ function predictGame(homeStats: any, awayStats: any) {
   const ptsPctAdj = (homeStats.pointsPct - awayStats.pointsPct) * 0.15;
   
   let homeWinProb = baseProb + HOME_ICE_BOOST + ptsPctAdj;
+  
+  // Apply B2B penalties (before injuries, as they compound)
+  if (isHomeB2B) homeWinProb -= B2B_PENALTY;
+  if (isAwayB2B) homeWinProb += B2B_PENALTY;  // Away B2B helps home team
+  
+  // Apply injury adjustments
+  let injuryImpact = null;
+  if (injuryAdj) {
+    // Net injury effect: home injuries hurt home, away injuries hurt away
+    const netInjuryEffect = injuryAdj.homeWinProbAdjustment - injuryAdj.awayWinProbAdjustment;
+    homeWinProb += netInjuryEffect;
+    
+    // Build detailed injury impact object
+    injuryImpact = {
+      homeStarsOut: injuryAdj.homeStarsOut,
+      awayStarsOut: injuryAdj.awayStarsOut,
+      homeAdjustment: Math.round(injuryAdj.homeWinProbAdjustment * 100),  // As percentage
+      awayAdjustment: Math.round(injuryAdj.awayWinProbAdjustment * 100),
+      homeSummary: injuryAdj.homeInjurySummary,
+      awaySummary: injuryAdj.awayInjurySummary,
+      homeGoalie: injuryAdj.homeGoalieSituation,
+      awayGoalie: injuryAdj.awayGoalieSituation,
+      compoundingWarning: injuryAdj.compoundingWarning || null,
+      homePPImpact: Math.round(injuryAdj.homePPAdjustment * 100),
+      awayPPImpact: Math.round(injuryAdj.awayPPAdjustment * 100),
+    };
+  }
+  
   homeWinProb = Math.max(0.28, Math.min(0.72, homeWinProb));
   
-  const predictedTotal = homeStats.goalsForPerGame + awayStats.goalsForPerGame;
+  let predictedTotal = homeStats.goalsForPerGame + awayStats.goalsForPerGame;
+  if (injuryAdj) {
+    predictedTotal += injuryAdj.expectedTotalAdjustment;
+  }
   
+  // Confidence adjustments
   let confidence = 0.45;
   if (homeStats.gamesPlayed >= 20 && awayStats.gamesPlayed >= 20) confidence += 0.15;
   if (Math.abs(homeWinProb - 0.5) > 0.12) confidence += 0.1;
-  confidence = Math.min(0.80, confidence);
+  // Reduce confidence if major injuries or compounding
+  if (injuryAdj?.compoundingWarning) confidence -= 0.05;
+  confidence = Math.max(0.30, Math.min(0.80, confidence));
   
-  return { homeWinProb, predictedTotal, confidence };
+  return { 
+    homeWinProb, 
+    predictedTotal, 
+    confidence, 
+    injuryImpact,
+    isHomeB2B,
+    isAwayB2B,
+  };
 }
 
 // ============ MAIN HANDLER ============
@@ -218,6 +311,9 @@ export async function GET() {
   
   try {
     console.log('🏒 Games API started');
+    
+    // Refresh injury cache (will use cached if fresh)
+    await refreshInjuryCache().catch(e => console.log('⚠️ Injury refresh error:', e.message));
     
     // Fetch schedule, standings, and odds in parallel
     const [schedRes, standings, oddsMap] = await Promise.all([
@@ -244,6 +340,10 @@ export async function GET() {
     
     console.log(`📅 Today (ET): ${todayStr}, Schedule has ${gameWeek.length} days`);
     
+    // Detect B2B: get teams that played yesterday
+    const yesterdayTeams = await getYesterdayTeams(gameWeek);
+    console.log(`📊 Teams on B2B: ${Array.from(yesterdayTeams).join(', ') || 'none'}`);
+    
     const gamesByDate: Record<string, any[]> = {};
     const dates: string[] = [];
     
@@ -254,6 +354,21 @@ export async function GET() {
       dates.push(dateStr);
       gamesByDate[dateStr] = [];
       
+      // For future dates, we need to track B2B from previous day
+      let teamsPlayedPrevDay = new Set<string>();
+      if (dateStr === todayStr) {
+        teamsPlayedPrevDay = yesterdayTeams;
+      } else {
+        // For future dates, check if they played the day before
+        const prevDateIdx = gameWeek.findIndex((d: any) => d.date === dateStr) - 1;
+        if (prevDateIdx >= 0) {
+          for (const g of gameWeek[prevDateIdx]?.games || []) {
+            if (g.homeTeam?.abbrev) teamsPlayedPrevDay.add(g.homeTeam.abbrev);
+            if (g.awayTeam?.abbrev) teamsPlayedPrevDay.add(g.awayTeam.abbrev);
+          }
+        }
+      }
+      
       for (const game of day.games || []) {
         const homeAbbrev = game.homeTeam?.abbrev;
         const awayAbbrev = game.awayTeam?.abbrev;
@@ -261,7 +376,20 @@ export async function GET() {
         
         const homeStats = getTeamStats(standings, homeAbbrev);
         const awayStats = getTeamStats(standings, awayAbbrev);
-        const pred = predictGame(homeStats, awayStats);
+        
+        // Detect back-to-back
+        const isHomeB2B = teamsPlayedPrevDay.has(homeAbbrev);
+        const isAwayB2B = teamsPlayedPrevDay.has(awayAbbrev);
+        
+        // Get injury adjustments (with B2B for compounding)
+        const injuryAdj = await getGamePredictionAdjustments(
+          homeAbbrev, 
+          awayAbbrev, 
+          isHomeB2B, 
+          isAwayB2B
+        );
+        
+        const pred = predictGame(homeStats, awayStats, injuryAdj, isHomeB2B, isAwayB2B);
         
         const oddsKey = `${awayAbbrev}@${homeAbbrev}`;
         const odds = oddsMap.get(oddsKey);
@@ -279,11 +407,13 @@ export async function GET() {
             id: game.homeTeam?.id || 0,
             name: getTeamName(game.homeTeam),
             abbreviation: homeAbbrev,
+            isB2B: isHomeB2B,
           },
           awayTeam: {
             id: game.awayTeam?.id || 0,
             name: getTeamName(game.awayTeam),
             abbreviation: awayAbbrev,
+            isB2B: isAwayB2B,
           },
           startTime: game.startTimeUTC || '',
           status: game.gameState === 'LIVE' ? 'live' : game.gameState === 'FINAL' ? 'final' : 'scheduled',
@@ -292,6 +422,9 @@ export async function GET() {
             awayWinProbability: 1 - pred.homeWinProb,
             predictedTotal: pred.predictedTotal,
             confidence: pred.confidence,
+            injuryImpact: pred.injuryImpact,
+            isHomeB2B: pred.isHomeB2B,
+            isAwayB2B: pred.isAwayB2B,
           },
           odds: odds ? [{
             bookmaker: odds.bookmaker,
