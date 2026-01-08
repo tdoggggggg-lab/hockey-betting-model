@@ -17,11 +17,14 @@ interface PropPrediction {
   line: number;
   confidence: number;
   isValueBet: boolean;
-  injuryNote?: string;  // e.g., "Linemate injured (-25%)"
+  edge?: number;
+  bookImpliedProb?: number;
+  injuryNote?: string;
   bookOdds?: {
     over: number;
     under: number;
     line: number;
+    bookmaker?: string;
   };
 }
 
@@ -316,10 +319,15 @@ export default function PlayerPropsTable({ propType, title, statLabel }: PlayerP
                     <span className="font-mono text-sm text-amber-400">{formatFairOdds(pred.probability)}</span>
                   </td>
                   <td className="py-3 px-3 text-center">
-                    {pred.bookOdds ? (
-                      <span className="font-mono text-sm text-white">
-                        {pred.bookOdds.over > 0 ? '+' : ''}{pred.bookOdds.over}
-                      </span>
+                    {pred.bookOdds?.over ? (
+                      <div className="flex flex-col items-center">
+                        <span className="font-mono text-sm text-white">
+                          {pred.bookOdds.over > 0 ? '+' : ''}{pred.bookOdds.over}
+                        </span>
+                        {pred.edge && pred.edge > 0.03 && (
+                          <span className="text-xs text-emerald-400">+{Math.round(pred.edge * 100)}%</span>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-slate-600 text-sm">-</span>
                     )}
