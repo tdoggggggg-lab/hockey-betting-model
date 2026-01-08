@@ -21,10 +21,13 @@ interface PropPrediction {
   line: number;
   confidence: number;
   isValueBet: boolean;
+  edge?: number;  // Model prob - Book implied prob (e.g., 0.08 = 8% edge)
+  bookImpliedProb?: number;  // Book's implied probability
   bookOdds?: {
     over: number;
     under: number;
     line: number;
+    bookmaker?: string;
   };
   injuryNote?: string;  // e.g., "Linemate injured (-25% production)"
 }
@@ -60,10 +63,12 @@ interface GoaliePrediction {
 }
 
 // ============ CACHE ============
-// Optimized for 500 credits/month:
-// - Player props: 6 hour cache = 4 calls/day = 120/month
-// - Game odds: 2 hour cache (handled in games route) = 360/month
-// Total: ~480/month ✅
+// Optimized for 500 credits/month FREE TIER:
+// - Events: 24hr cache = 1 call/day = 30/month
+// - Game odds: 24hr cache = 1 call/day = 30/month (in games route)
+// - Player props: 24hr cache, 2 games per market = 60/month per market
+// - 4 markets = 240/month
+// Total: ~300/month ✅
 
 let propsCache: { 
   data: Map<string, any>; 
@@ -77,7 +82,7 @@ let propsCache: {
   playerStatsTimestamp: 0,
 };
 
-const PROPS_CACHE_TTL = 21600000; // 6 hours for book odds (to save API credits)
+const PROPS_CACHE_TTL = 86400000; // 24 hours - refreshes once daily to save credits
 const PLAYER_STATS_CACHE_TTL = 600000; // 10 minutes for NHL stats (free)
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
@@ -178,85 +183,181 @@ async function getGoalieStats(teamAbbrev: string): Promise<any[]> {
   }
 }
 
-// ============ FETCH BOOK ODDS (Optimized) ============
+// ============ FETCH BOOK ODDS (Per-Event for Player Props) ============
+
+// Cache for events list (valid for 24 hours to save credits)
+let eventsCache: { events: any[]; timestamp: number } = { events: [], timestamp: 0 };
+const EVENTS_CACHE_TTL = 86400000; // 24 hours
+
+async function fetchNHLEvents(): Promise<any[]> {
+  // Check cache
+  if (eventsCache.events.length > 0 && Date.now() - eventsCache.timestamp < EVENTS_CACHE_TTL) {
+    return eventsCache.events;
+  }
+  
+  if (!ODDS_API_KEY) return [];
+  
+  try {
+    const url = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/events?apiKey=${ODDS_API_KEY}`;
+    const response = await fetchWithTimeout(url, 10000);
+    
+    if (!response.ok) {
+      console.log(`❌ Events API: ${response.status}`);
+      return eventsCache.events; // Return stale cache if available
+    }
+    
+    const events = await response.json();
+    const remaining = response.headers.get('x-requests-remaining');
+    console.log(`📋 Events API: ${events.length} NHL events, ${remaining} credits left`);
+    
+    eventsCache = { events, timestamp: Date.now() };
+    return events;
+  } catch (error: any) {
+    console.log(`❌ Events error: ${error.message}`);
+    return eventsCache.events;
+  }
+}
 
 async function fetchPlayerPropsOdds(propType: string): Promise<Map<string, any>> {
   const oddsMap = new Map();
   
-  if (!ODDS_API_KEY) return oddsMap;
+  if (!ODDS_API_KEY) {
+    console.log('⚠️ No ODDS_API_KEY - skipping book odds');
+    return oddsMap;
+  }
   
   // Check cache (6 hour TTL to save credits)
   const cacheKey = `props_${propType}`;
   const cached = propsCache.data.get(cacheKey);
   if (cached && Date.now() - propsCache.timestamp < PROPS_CACHE_TTL) {
-    console.log(`✅ Using cached ${propType} odds`);
+    console.log(`✅ Using cached ${propType} odds (${cached.size} players)`);
     return cached;
   }
   
   // Map prop type to Odds API market
   const marketMap: Record<string, string> = {
-    'goalscorer': 'player_goal_scorer_anytime',
+    'goalscorer': 'player_goal_scorer_anytime',  // Anytime goalscorer
     'shots': 'player_shots_on_goal',
     'points': 'player_points',
     'assists': 'player_assists',
   };
   
   const market = marketMap[propType];
-  if (!market) return oddsMap;
+  if (!market) {
+    console.log(`⚠️ No market mapping for ${propType}`);
+    return oddsMap;
+  }
   
   try {
-    console.log(`🔄 Fetching ${propType} book odds...`);
-    const url = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=${market}&bookmakers=draftkings`;
+    // Step 1: Get list of events (uses 1 credit, cached for 1 hour)
+    const events = await fetchNHLEvents();
     
-    const response = await fetchWithTimeout(url, 10000);
-    if (!response.ok) {
-      console.log(`❌ Props odds API: ${response.status}`);
+    if (events.length === 0) {
+      console.log('⚠️ No NHL events found');
       return cached || oddsMap;
     }
     
-    const data = await response.json();
-    const remaining = response.headers.get('x-requests-remaining');
-    console.log(`📊 Props API: ${data.length} games, ${remaining} credits left`);
+    // Filter to today's events only (to save credits)
+    const now = new Date();
+    const todayStart = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    todayStart.setHours(0, 0, 0, 0);
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
     
-    // Parse odds
-    for (const game of data) {
-      const dk = game.bookmakers?.find((b: any) => b.key === 'draftkings');
-      if (!dk) continue;
-      
-      const marketData = dk.markets?.find((m: any) => m.key === market);
-      if (!marketData) continue;
-      
-      for (const outcome of marketData.outcomes || []) {
-        const playerName = outcome.description || outcome.name;
-        const line = outcome.point || 0.5;
-        const odds = outcome.price || 0;
+    const todayEvents = events.filter((e: any) => {
+      const eventTime = new Date(e.commence_time);
+      return eventTime >= todayStart && eventTime < tomorrowStart;
+    });
+    
+    console.log(`🔄 Fetching ${propType} props for ${todayEvents.length} today's games...`);
+    
+    // Step 2: Fetch player props for each event (1 credit per event per market)
+    // Limit to max 2 games to stay within 500 free credits/month
+    const eventsToFetch = todayEvents.slice(0, 2);
+    
+    let totalPlayersFound = 0;
+    
+    for (const event of eventsToFetch) {
+      try {
+        const eventUrl = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/events/${event.id}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=${market}&bookmakers=draftkings,fanduel`;
         
-        // Store by player name (normalized)
-        const key = playerName.toLowerCase().trim();
-        if (!oddsMap.has(key)) {
-          oddsMap.set(key, { over: 0, under: 0, line });
+        const response = await fetchWithTimeout(eventUrl, 8000);
+        
+        if (!response.ok) {
+          console.log(`❌ Event ${event.id} props: ${response.status}`);
+          continue;
         }
         
-        const entry = oddsMap.get(key);
-        if (outcome.name === 'Over' || !outcome.name.includes('Under')) {
-          entry.over = odds > 0 ? odds : Math.round(-100 / (odds / 100 - 1));
-        } else {
-          entry.under = odds > 0 ? odds : Math.round(-100 / (odds / 100 - 1));
+        const data = await response.json();
+        const remaining = response.headers.get('x-requests-remaining');
+        
+        // Parse bookmakers
+        for (const bookmaker of data.bookmakers || []) {
+          const marketData = bookmaker.markets?.find((m: any) => m.key === market);
+          if (!marketData) continue;
+          
+          for (const outcome of marketData.outcomes || []) {
+            // For anytime goalscorer, the player name is in 'description' or 'name'
+            const playerName = outcome.description || outcome.name;
+            if (!playerName || playerName === 'Over' || playerName === 'Under') continue;
+            
+            const line = outcome.point ?? 0.5;
+            const odds = outcome.price || 0;
+            
+            // Normalize player name for matching
+            const key = playerName.toLowerCase().trim();
+            
+            if (!oddsMap.has(key)) {
+              oddsMap.set(key, { 
+                over: 0, 
+                under: 0, 
+                line,
+                bookmaker: bookmaker.title,
+                homeTeam: event.home_team,
+                awayTeam: event.away_team,
+              });
+            }
+            
+            const entry = oddsMap.get(key);
+            
+            // For anytime goalscorer, there's typically just one price (to score)
+            if (market === 'player_goal_scorer_anytime') {
+              entry.over = odds; // The odds TO score
+              entry.line = 0.5;
+            } else {
+              // For O/U props (shots, points, assists)
+              if (outcome.name === 'Over') {
+                entry.over = odds;
+                entry.line = line;
+              } else if (outcome.name === 'Under') {
+                entry.under = odds;
+              }
+            }
+            
+            totalPlayersFound++;
+          }
         }
+        
+        console.log(`  ✅ ${event.home_team} vs ${event.away_team}: found props, ${remaining} credits left`);
+        
+      } catch (eventError: any) {
+        console.log(`  ❌ Event error: ${eventError.message}`);
       }
     }
     
     // Update cache
-    propsCache.data.set(cacheKey, oddsMap);
-    propsCache.timestamp = Date.now();
-    console.log(`💾 Cached ${oddsMap.size} player odds for ${propType}`);
+    if (oddsMap.size > 0) {
+      propsCache.data.set(cacheKey, oddsMap);
+      propsCache.timestamp = Date.now();
+      console.log(`💾 Cached ${oddsMap.size} player ${propType} odds`);
+    }
+    
+    return oddsMap;
     
   } catch (error: any) {
     console.log(`❌ Props odds error: ${error.message}`);
     return cached || oddsMap;
   }
-  
-  return oddsMap;
 }
 
 // ============ PROCESS PLAYERS ============
@@ -681,19 +782,51 @@ export async function GET(request: Request) {
       // Sort by probability
       allPredictions.sort((a, b) => b.probability - a.probability);
       
-      // Mark top picks
-      const topPicks = allPredictions
+      // Calculate edge when we have book odds
+      // Edge = Model Probability - Book Implied Probability
+      const predictionsWithEdge = allPredictions.map(p => {
+        let edge = 0;
+        let bookImpliedProb = 0;
+        
+        if (p.bookOdds?.over) {
+          // Convert American odds to implied probability
+          const odds = p.bookOdds.over;
+          if (odds > 0) {
+            bookImpliedProb = 100 / (odds + 100);
+          } else {
+            bookImpliedProb = Math.abs(odds) / (Math.abs(odds) + 100);
+          }
+          edge = p.probability - bookImpliedProb;
+        }
+        
+        return {
+          ...p,
+          edge: Math.round(edge * 100) / 100, // e.g., 0.08 = 8% edge
+          bookImpliedProb: Math.round(bookImpliedProb * 100) / 100,
+        };
+      });
+      
+      // Mark value bets: edge > 5% AND confidence > 50% AND has book odds
+      const valueBets = predictionsWithEdge
+        .filter(p => p.edge > 0.05 && p.confidence >= 0.50 && p.bookOdds)
+        .sort((a, b) => b.edge - a.edge)
+        .slice(0, 10)
+        .map(p => ({ ...p, isValueBet: true }));
+      
+      // If no edge-based value bets, fall back to top picks by probability
+      const topPicks = valueBets.length > 0 ? valueBets : predictionsWithEdge
         .filter(p => p.probability >= 0.20 && p.confidence >= 0.45)
         .slice(0, 10)
         .map(p => ({ ...p, isValueBet: true }));
       
       const topPickIds = new Set(topPicks.map(p => p.playerId));
-      const markedPredictions = allPredictions.map(p => ({
+      const markedPredictions = predictionsWithEdge.map(p => ({
         ...p,
         isValueBet: topPickIds.has(p.playerId),
       }));
       
       console.log(`📊 Generated ${allPredictions.length} ${propType} predictions`);
+      console.log(`💰 Found ${valueBets.length} value bets with edge > 5%`);
       
       return NextResponse.json({
         predictions: markedPredictions,
@@ -703,6 +836,7 @@ export async function GET(request: Request) {
         playersAnalyzed: allPredictions.length,
         gameDate,
         fetchTimeMs: Date.now() - startTime,
+        oddsSource: valueBets.length > 0 ? 'live' : 'model-only',
       });
     }
     
