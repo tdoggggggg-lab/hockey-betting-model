@@ -17,9 +17,16 @@ interface PropPrediction {
   line: number;
   confidence: number;
   isValueBet: boolean;
-  bookmakerOdds?: number;
+  edge?: number;  // Model prob - Book implied prob (e.g., 0.08 = 8% edge)
+  bookImpliedProb?: number;
+  bookOdds?: {
+    over: number;
+    under: number;
+    line: number;
+    bookmaker?: string;
+  };
   injuryNote?: string;  // e.g., "Linemate injured (-25%)"
-  breakdown: {
+  breakdown?: {
     basePrediction: number;
     homeAwayAdj: number;
     backToBackAdj: number;
@@ -231,8 +238,24 @@ export default function GoalscorerTable() {
                 </div>
                 <div className="mt-2 flex justify-between text-sm">
                   <div><div className="text-slate-500">Probability</div><div className="text-white font-semibold">{formatProbability(pred.probability)}</div></div>
-                  <div><div className="text-slate-500">Confidence</div><div className="text-white font-semibold">{Math.round(pred.confidence * 100)}%</div></div>
+                  <div>
+                    <div className="text-slate-500">
+                      {pred.bookOdds?.over ? 'Book Odds' : 'Confidence'}
+                    </div>
+                    <div className="text-white font-semibold">
+                      {pred.bookOdds?.over 
+                        ? (pred.bookOdds.over > 0 ? `+${pred.bookOdds.over}` : pred.bookOdds.over)
+                        : `${Math.round(pred.confidence * 100)}%`}
+                    </div>
+                  </div>
                 </div>
+                {pred.edge && pred.edge > 0.03 && (
+                  <div className="mt-1 text-center">
+                    <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full">
+                      +{Math.round(pred.edge * 100)}% edge
+                    </span>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -342,7 +365,20 @@ export default function GoalscorerTable() {
                       {formatFairOdds(pred.probability)}
                     </span>
                   </td>
-                  <td className="py-3 px-2 text-center text-slate-500 font-mono text-sm">-</td>
+                  <td className="py-3 px-2 text-center">
+                    {pred.bookOdds?.over ? (
+                      <div className="flex flex-col items-center">
+                        <span className="font-mono text-sm text-white">
+                          {pred.bookOdds.over > 0 ? `+${pred.bookOdds.over}` : pred.bookOdds.over}
+                        </span>
+                        {pred.edge && pred.edge > 0.03 && (
+                          <span className="text-xs text-emerald-400">+{Math.round(pred.edge * 100)}% edge</span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-slate-600 text-xs">-</span>
+                    )}
+                  </td>
                   <td className="py-3 px-2 text-center">
                     <div className="flex flex-col items-center">
                       <span className={`text-sm ${confDisplay.color}`}>{confDisplay.dots}</span>
@@ -376,7 +412,7 @@ export default function GoalscorerTable() {
         <h4 className="text-sm font-medium text-slate-400 mb-2">About the Predictions</h4>
         <div className="text-xs text-slate-500 space-y-1">
           <p><strong>Fair Odds:</strong> What the odds should be based on our model&apos;s probability (no vig)</p>
-          <p><strong>Book Odds:</strong> Live sportsbook odds from DraftKings, FanDuel, etc. (coming January)</p>
+          <p><strong>Book Odds:</strong> Live odds from DraftKings/FanDuel. Edge shows when model disagrees with Vegas.</p>
           <p><strong>Probability:</strong> Model-predicted chance of scoring using Poisson distribution</p>
           <p><strong>Confidence:</strong> How reliable the prediction is (player quality, form, matchup)</p>
         </div>
