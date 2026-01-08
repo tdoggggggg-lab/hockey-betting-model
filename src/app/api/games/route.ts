@@ -13,7 +13,7 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY;
 let oddsCache: { data: Map<string, any>; timestamp: number } | null = null;
 let standingsCache: { data: any[]; timestamp: number } | null = null;
 
-const ODDS_CACHE_TTL = 7200000; // 2 hours (for 500 credits/month)
+const ODDS_CACHE_TTL = 43200000; // 12 hours - refreshes twice daily to save credits
 const STANDINGS_CACHE_TTL = 300000; // 5 minutes
 
 // ============ HELPERS ============
