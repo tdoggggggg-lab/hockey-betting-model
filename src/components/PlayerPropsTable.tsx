@@ -17,6 +17,7 @@ interface PropPrediction {
   line: number;
   confidence: number;
   isValueBet: boolean;
+  injuryNote?: string;  // e.g., "Linemate injured (-25%)"
   bookOdds?: {
     over: number;
     under: number;
@@ -195,6 +196,9 @@ export default function PlayerPropsTable({ propType, title, statLabel }: PlayerP
                     <div>
                       <div className="font-medium text-white text-sm">{pred.playerName}</div>
                       <div className="text-xs text-slate-400">{pred.isHome ? 'vs' : '@'} {pred.opponentAbbrev}</div>
+                      {pred.injuryNote && (
+                        <div className="text-xs text-yellow-400">⚠️ {pred.injuryNote}</div>
+                      )}
                     </div>
                   </div>
                   <div className="text-emerald-400 font-bold">#{index + 1}</div>
@@ -276,6 +280,9 @@ export default function PlayerPropsTable({ propType, title, statLabel }: PlayerP
                       <div className="min-w-0">
                         <div className="font-medium text-white truncate">{pred.playerName}</div>
                         <div className="text-slate-500 text-xs truncate">{pred.team}</div>
+                        {pred.injuryNote && (
+                          <div className="text-xs text-yellow-400">⚠️ {pred.injuryNote}</div>
+                        )}
                       </div>
                     </div>
                   </td>
