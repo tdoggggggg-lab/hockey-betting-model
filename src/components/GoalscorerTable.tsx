@@ -18,6 +18,7 @@ interface PropPrediction {
   confidence: number;
   isValueBet: boolean;
   bookmakerOdds?: number;
+  injuryNote?: string;  // e.g., "Linemate injured (-25%)"
   breakdown: {
     basePrediction: number;
     homeAwayAdj: number;
@@ -218,6 +219,9 @@ export default function GoalscorerTable() {
                     <div>
                       <div className="font-medium text-white">{pred.playerName}</div>
                       <div className="text-xs text-slate-400">{pred.isHome ? 'vs' : '@'} {pred.opponentAbbrev} • {pred.gameTime}</div>
+                      {pred.injuryNote && (
+                        <div className="text-xs text-yellow-400">⚠️ {pred.injuryNote}</div>
+                      )}
                     </div>
                   </div>
                   <div className="text-right">
@@ -314,6 +318,9 @@ export default function GoalscorerTable() {
                       <div>
                         <div className="font-medium text-white">{pred.playerName}</div>
                         <div className="text-slate-500 text-xs">{pred.team}</div>
+                        {pred.injuryNote && (
+                          <div className="text-xs text-yellow-400">⚠️ {pred.injuryNote}</div>
+                        )}
                       </div>
                     </div>
                   </td>
