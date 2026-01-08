@@ -1,10 +1,24 @@
 'use client';
 
+interface InjuryImpact {
+  homeStarsOut: string[];
+  awayStarsOut: string[];
+  homeAdjustment: number;
+  awayAdjustment: number;
+  homeSummary: string;
+  awaySummary: string;
+  homeGoalie: string;
+  awayGoalie: string;
+  compoundingWarning?: string;
+  homePPImpact: number;
+  awayPPImpact: number;
+}
+
 interface GameRowProps {
   game: {
     id: string;
-    homeTeam: { id?: number; name: string; abbreviation: string; };
-    awayTeam: { id?: number; name: string; abbreviation: string; };
+    homeTeam: { id?: number; name: string; abbreviation: string; isB2B?: boolean; };
+    awayTeam: { id?: number; name: string; abbreviation: string; isB2B?: boolean; };
     startTime: string;
     status: string;
     prediction?: {
@@ -12,6 +26,9 @@ interface GameRowProps {
       awayWinProbability: number;
       predictedTotal: number;
       confidence: number;
+      injuryImpact?: InjuryImpact | null;
+      isHomeB2B?: boolean;
+      isAwayB2B?: boolean;
     };
     odds?: {
       bookmaker: string;
@@ -78,8 +95,10 @@ export default function GameRow({ game }: GameRowProps) {
     awayWinProbability: 0.5,
     predictedTotal: 5.5,
     confidence: 0.5,
+    injuryImpact: null,
   };
   
+  const injuryImpact = prediction.injuryImpact;
   const odds = game.odds?.[0]; // Get first bookmaker (DraftKings)
   const hasOdds = odds && (odds.homeMoneyline !== 0 || odds.awayMoneyline !== 0);
   
@@ -87,6 +106,21 @@ export default function GameRow({ game }: GameRowProps) {
   const awayProb = prediction.awayWinProbability;
   const favoriteAbbrev = homeProb > awayProb ? game.homeTeam.abbreviation : game.awayTeam.abbreviation;
   const favoriteProb = Math.max(homeProb, awayProb);
+  
+  // Format injury adjustment display (e.g., "-3.2%")
+  const formatInjuryAdj = (adj: number): string => {
+    if (!adj || adj === 0) return '';
+    return adj > 0 ? `+${adj}%` : `${adj}%`;
+  };
+  
+  // Get first star name for display (e.g., "McDavid out" instead of full array)
+  const getInjuryNote = (starsOut: string[], adjustment: number): string | null => {
+    if (!starsOut || starsOut.length === 0 || adjustment >= 0) return null;
+    // Extract just the player name (before the tier notation)
+    const firstName = starsOut[0].split(' (')[0];
+    const lastName = firstName.split(' ').pop() || firstName;
+    return `${lastName} out`;
+  };
   
   // Calculate edge (value) if we have book odds
   let homeEdge = 0;
@@ -136,7 +170,18 @@ export default function GameRow({ game }: GameRowProps) {
               style={{ backgroundColor: teamColors[game.awayTeam.abbreviation] || '#374151', color: 'white' }}>
               {game.awayTeam.abbreviation}
             </div>
-            <span className="text-white font-medium text-sm truncate">{game.awayTeam.name}</span>
+            <div className="flex flex-col">
+              <span className="text-white font-medium text-sm truncate">{game.awayTeam.name}</span>
+              {/* Injury indicator */}
+              {injuryImpact && injuryImpact.awayStarsOut && injuryImpact.awayStarsOut.length > 0 && (
+                <span className="text-red-400 text-xs">
+                  🏥 {formatInjuryAdj(injuryImpact.awayAdjustment)} ({getInjuryNote(injuryImpact.awayStarsOut, injuryImpact.awayAdjustment)})
+                </span>
+              )}
+              {prediction.isAwayB2B && (
+                <span className="text-yellow-500 text-xs">⚡ B2B</span>
+              )}
+            </div>
           </div>
           <div className="col-span-2 text-center">
             <span className={`text-sm font-semibold ${awayProb > homeProb ? 'text-emerald-400' : 'text-slate-400'}`}>
@@ -161,7 +206,18 @@ export default function GameRow({ game }: GameRowProps) {
               style={{ backgroundColor: teamColors[game.homeTeam.abbreviation] || '#374151', color: 'white' }}>
               {game.homeTeam.abbreviation}
             </div>
-            <span className="text-white font-medium text-sm truncate">{game.homeTeam.name}</span>
+            <div className="flex flex-col">
+              <span className="text-white font-medium text-sm truncate">{game.homeTeam.name}</span>
+              {/* Injury indicator */}
+              {injuryImpact && injuryImpact.homeStarsOut && injuryImpact.homeStarsOut.length > 0 && (
+                <span className="text-red-400 text-xs">
+                  🏥 {formatInjuryAdj(injuryImpact.homeAdjustment)} ({getInjuryNote(injuryImpact.homeStarsOut, injuryImpact.homeAdjustment)})
+                </span>
+              )}
+              {prediction.isHomeB2B && (
+                <span className="text-yellow-500 text-xs">⚡ B2B</span>
+              )}
+            </div>
           </div>
           <div className="col-span-2 text-center">
             <span className={`text-sm font-semibold ${homeProb > awayProb ? 'text-emerald-400' : 'text-slate-400'}`}>
