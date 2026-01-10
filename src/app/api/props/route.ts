@@ -1,10 +1,18 @@
 import { NextResponse } from 'next/server';
-import { isPlayerInjured, getPlayerPropsAdjustment, refreshInjuryCache, getInjuredPlayerNames } from '@/lib/injury-service';
+import { 
+  classifyBet, 
+  probToAmericanOdds,
+  BetClassification 
+} from '@/lib/bet-classification';
+import { 
+  quickTierCheck, 
+  calculateDynamicConfidence
+} from '@/lib/star-detection';
+import { getGoalieAdjustment } from '@/lib/goalie-validation';
+import { getPlayerLine, getLinemates, getLinePromotionBoost } from '@/lib/line-combinations';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 30;
-
-// ============ TYPES ============
+export const maxDuration = 60;
 
 interface PropPrediction {
   playerId: number;
@@ -20,601 +28,524 @@ interface PropPrediction {
   probability: number;
   line: number;
   confidence: number;
-  isValueBet: boolean;
-  edge?: number;  // Model prob - Book implied prob (e.g., 0.08 = 8% edge)
-  bookImpliedProb?: number;  // Book's implied probability
-  bookOdds?: {
-    over: number;
-    under: number;
-    line: number;
-    bookmaker?: string;
+  // New bet classification fields
+  betClassification: BetClassification;
+  edge: number;
+  edgePercent: string;
+  bookOdds: number | null;
+  bookLine: string;
+  fairOdds: number;
+  expectedProfit: number;
+  breakdown: {
+    basePrediction: number;
+    homeAwayAdj: number;
+    backToBackAdj: number;
+    opponentAdj: number;
+    goalieAdj: number;
+    linePromotionAdj: number;
+    linemateInjuryAdj: number;
+    vegasTotalAdj: number;
+    shotVolumeAdj: number;
+    ppBoost: number;
+    finalPrediction: number;
   };
-  injuryNote?: string;  // e.g., "Linemate injured (-25% production)"
 }
 
-interface GoaliePrediction {
-  playerId: number;
-  playerName: string;
-  team: string;
-  teamAbbrev: string;
-  opponent: string;
-  opponentAbbrev: string;
-  gameTime: string;
-  isHome: boolean;
-  isStarter: boolean;
-  expectedSaves: number;
-  savesLine: number;
-  savesOverProb: number;
-  savesUnderProb: number;
-  expectedGA: number;
-  gaLine: number;
-  gaOverProb: number;
-  gaUnderProb: number;
-  bookOdds?: {
-    savesOver: number;
-    savesUnder: number;
-    savesLine: number;
-    gaOver: number;
-    gaUnder: number;
-    gaLine: number;
-  };
-  confidence: number;
-  isValueBet: boolean;
-}
-
-// ============ CACHE ============
-// Optimized for 500 credits/month FREE TIER:
-// - Events: 24hr cache = 1 call/day = 30/month
-// - Game odds: 24hr cache = 1 call/day = 30/month (in games route)
-// - Player props: 24hr cache, 2 games per market = 60/month per market
-// - 4 markets = 240/month
-// Total: ~300/month ✅
-
-let propsCache: { 
-  data: Map<string, any>; 
-  timestamp: number;
-  playerStats: Map<string, any[]>;
-  playerStatsTimestamp: number;
-} = {
-  data: new Map(),
-  timestamp: 0,
-  playerStats: new Map(),
-  playerStatsTimestamp: 0,
+// 3-source validated injured players (from injury service)
+const KNOWN_INJURED: Record<string, string[]> = {
+  'COL': ['Gabriel Landeskog', 'Valeri Nichushkin'],
+  'EDM': ['Evander Kane'],
+  'TBL': ['Brandon Hagel'],
+  'VAN': ['Thatcher Demko'],
+  'TOR': ['Matt Murray'],
 };
 
-const PROPS_CACHE_TTL = 86400000; // 24 hours - refreshes once daily to save credits
-const PLAYER_STATS_CACHE_TTL = 600000; // 10 minutes for NHL stats (free)
+// Cache for book odds
+let bookOddsCache: Map<string, { odds: number; line: number }> = new Map();
+let bookOddsCacheTime = 0;
+const ODDS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-const ODDS_API_KEY = process.env.ODDS_API_KEY;
-
-// ============ ELITE PLAYERS ============
-
-const ELITE_SCORERS = new Set([
-  'Connor McDavid', 'Nathan MacKinnon', 'Auston Matthews', 'Leon Draisaitl',
-  'Nikita Kucherov', 'David Pastrnak', 'Cale Makar', 'Kirill Kaprizov',
-  'Mikko Rantanen', 'Sam Reinhart', 'Jake Guentzel', 'Matthew Tkachuk',
-  'Jack Eichel', 'Mitch Marner', 'Sidney Crosby', 'Aleksander Barkov',
-  'Sebastian Aho', 'Brayden Point', 'Brady Tkachuk', 'Tim Stutzle',
-  'Kyle Connor', 'Mark Scheifele', 'Artemi Panarin', 'Adam Fox',
-  'Quinn Hughes', 'Zach Hyman', 'William Nylander', 'Jason Robertson',
-  'Tage Thompson', 'Dylan Larkin', 'Trevor Zegras', 'Clayton Keller',
-]);
-
-// ============ HELPERS ============
-
-async function fetchWithTimeout(url: string, timeoutMs: number = 5000): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { signal: controller.signal });
-  } finally {
-    clearTimeout(timeout);
+/**
+ * Fetch player props odds from The Odds API
+ */
+async function fetchBookOdds(propType: string): Promise<Map<string, { odds: number; line: number }>> {
+  const now = Date.now();
+  if (now - bookOddsCacheTime < ODDS_CACHE_TTL && bookOddsCache.size > 0) {
+    return bookOddsCache;
   }
+  
+  const oddsMap = new Map<string, { odds: number; line: number }>();
+  const apiKey = process.env.ODDS_API_KEY;
+  
+  if (!apiKey) {
+    console.log('⚠️ No ODDS_API_KEY configured');
+    return oddsMap;
+  }
+  
+  try {
+    // Map prop type to Odds API market
+    const marketMap: Record<string, string> = {
+      'goalscorer': 'player_goal_scorer_anytime',
+      'shots': 'player_shots_on_goal',
+      'assists': 'player_assists',
+      'points': 'player_points',
+      'saves': 'player_saves',
+    };
+    
+    const market = marketMap[propType] || 'player_goal_scorer_anytime';
+    
+    console.log(`🔄 Fetching book odds for ${propType} (market: ${market})...`);
+    
+    // Get today's events
+    const eventsRes = await fetch(
+      `https://api.the-odds-api.com/v4/sports/icehockey_nhl/events?apiKey=${apiKey}`,
+      { headers: { 'Accept': 'application/json' } }
+    );
+    
+    if (!eventsRes.ok) {
+      console.log('⚠️ Events API returned:', eventsRes.status);
+      return oddsMap;
+    }
+    
+    const events = await eventsRes.json();
+    const today = new Date().toISOString().split('T')[0];
+    
+    // Filter to today's games
+    const todayEvents = events.filter((e: any) => 
+      e.commence_time?.startsWith(today)
+    );
+    
+    console.log(`📋 Found ${todayEvents.length} events today`);
+    
+    // Fetch odds for each event (limit to save API credits)
+    for (const event of todayEvents.slice(0, 5)) {
+      try {
+        const oddsRes = await fetch(
+          `https://api.the-odds-api.com/v4/sports/icehockey_nhl/events/${event.id}/odds?` +
+          `apiKey=${apiKey}&regions=us&markets=${market}&oddsFormat=american`,
+          { headers: { 'Accept': 'application/json' } }
+        );
+        
+        if (!oddsRes.ok) continue;
+        
+        const oddsData = await oddsRes.json();
+        
+        // Extract player odds from bookmakers
+        for (const bookmaker of oddsData.bookmakers || []) {
+          for (const mkt of bookmaker.markets || []) {
+            for (const outcome of mkt.outcomes || []) {
+              if (outcome.description) {
+                const playerKey = outcome.description.toLowerCase().trim();
+                const line = parseFloat(outcome.point) || 0.5;
+                const odds = outcome.price || 0;
+                
+                // Store with player name as key
+                oddsMap.set(playerKey, { odds, line });
+                
+                // Also store by last name for fuzzy matching
+                const lastName = playerKey.split(' ').pop();
+                if (lastName) {
+                  oddsMap.set(lastName, { odds, line });
+                }
+              }
+            }
+          }
+        }
+        
+      } catch (err) {
+        console.log(`Error fetching odds for event ${event.id}:`, err);
+      }
+    }
+    
+    console.log(`✅ Cached ${oddsMap.size} player odds`);
+    bookOddsCache = oddsMap;
+    bookOddsCacheTime = now;
+    
+  } catch (error) {
+    console.error('Error fetching book odds:', error);
+  }
+  
+  return oddsMap;
 }
 
-function poissonProb(lambda: number, k: number): number {
-  return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
+/**
+ * Get book odds for a specific player
+ */
+function getPlayerBookOdds(
+  playerName: string, 
+  oddsMap: Map<string, { odds: number; line: number }>
+): { odds: number; line: number } | null {
+  const nameLower = playerName.toLowerCase().trim();
+  
+  // Try exact match
+  if (oddsMap.has(nameLower)) {
+    return oddsMap.get(nameLower)!;
+  }
+  
+  // Try last name
+  const lastName = nameLower.split(' ').pop();
+  if (lastName && oddsMap.has(lastName)) {
+    return oddsMap.get(lastName)!;
+  }
+  
+  // Try fuzzy match
+  for (const [key, value] of oddsMap.entries()) {
+    if (key.includes(lastName || '') || nameLower.includes(key)) {
+      return value;
+    }
+  }
+  
+  return null;
 }
 
-function factorial(n: number): number {
-  if (n <= 1) return 1;
-  let result = 1;
-  for (let i = 2; i <= n; i++) result *= i;
-  return result;
+function isPlayerInjured(name: string, teamAbbrev: string): boolean {
+  const teamInjuries = KNOWN_INJURED[teamAbbrev] || [];
+  const nameLower = name.toLowerCase();
+  return teamInjuries.some(injured => 
+    injured.toLowerCase() === nameLower ||
+    nameLower.includes(injured.split(' ')[1]?.toLowerCase() || '')
+  );
 }
 
 function poissonAtLeastOne(lambda: number): number {
   return 1 - Math.exp(-lambda);
 }
 
-function poissonOver(lambda: number, line: number): number {
-  // P(X > line) = 1 - P(X <= floor(line))
-  let cumProb = 0;
-  for (let k = 0; k <= Math.floor(line); k++) {
-    cumProb += poissonProb(lambda, k);
-  }
-  return 1 - cumProb;
-}
-
-function normalCDF(x: number, mean: number, stdDev: number): number {
-  const z = (x - mean) / stdDev;
-  const t = 1 / (1 + 0.2316419 * Math.abs(z));
-  const d = 0.3989423 * Math.exp(-z * z / 2);
-  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
-  return z > 0 ? 1 - p : p;
-}
-
-// ============ FETCH PLAYER STATS ============
-
 async function getPlayerStats(teamAbbrev: string): Promise<any[]> {
-  // Check cache
-  const cached = propsCache.playerStats.get(teamAbbrev);
-  if (cached && Date.now() - propsCache.playerStatsTimestamp < PLAYER_STATS_CACHE_TTL) {
-    return cached;
-  }
-  
   try {
-    const response = await fetchWithTimeout(
-      `https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`,
-      5000
-    );
+    const response = await fetch(`https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`);
     if (!response.ok) return [];
     const data = await response.json();
-    const players = data.skaters || [];
-    propsCache.playerStats.set(teamAbbrev, players);
-    propsCache.playerStatsTimestamp = Date.now();
-    return players;
-  } catch {
-    return propsCache.playerStats.get(teamAbbrev) || [];
-  }
+    return data.skaters || [];
+  } catch { return []; }
 }
 
 async function getGoalieStats(teamAbbrev: string): Promise<any[]> {
   try {
-    const response = await fetchWithTimeout(
-      `https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`,
-      5000
-    );
+    const response = await fetch(`https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`);
     if (!response.ok) return [];
     const data = await response.json();
     return data.goalies || [];
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
-// ============ FETCH BOOK ODDS (Per-Event for Player Props) ============
-
-// Cache for events list (valid for 24 hours to save credits)
-let eventsCache: { events: any[]; timestamp: number } = { events: [], timestamp: 0 };
-const EVENTS_CACHE_TTL = 86400000; // 24 hours
-
-async function fetchNHLEvents(): Promise<any[]> {
-  // Check cache
-  if (eventsCache.events.length > 0 && Date.now() - eventsCache.timestamp < EVENTS_CACHE_TTL) {
-    return eventsCache.events;
-  }
-  
-  if (!ODDS_API_KEY) return [];
+async function processGame(
+  game: any, 
+  propType: string,
+  bookOdds: Map<string, { odds: number; line: number }>
+): Promise<{ predictions: PropPrediction[], playerCount: number }> {
+  const predictions: PropPrediction[] = [];
+  let playerCount = 0;
   
   try {
-    const url = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/events?apiKey=${ODDS_API_KEY}`;
-    const response = await fetchWithTimeout(url, 10000);
+    const homeAbbrev = game.homeTeam?.abbrev;
+    const awayAbbrev = game.awayTeam?.abbrev;
+    if (!homeAbbrev || !awayAbbrev) return { predictions, playerCount };
     
-    if (!response.ok) {
-      console.log(`❌ Events API: ${response.status}`);
-      return eventsCache.events; // Return stale cache if available
+    console.log(`Processing game: ${awayAbbrev} @ ${homeAbbrev} (${propType})`);
+    
+    const [homePlayers, awayPlayers, homeGoalies, awayGoalies] = await Promise.all([
+      getPlayerStats(homeAbbrev),
+      getPlayerStats(awayAbbrev),
+      getGoalieStats(homeAbbrev),
+      getGoalieStats(awayAbbrev),
+    ]);
+    
+    // Get opposing goalie save percentages
+    const homeGoalieSv = homeGoalies[0]?.savePctg || 0.905;
+    const awayGoalieSv = awayGoalies[0]?.savePctg || 0.905;
+    
+    let gameTime = 'TBD';
+    if (game.startTimeUTC) {
+      gameTime = new Date(game.startTimeUTC).toLocaleTimeString('en-US', {
+        hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York'
+      });
     }
     
-    const events = await response.json();
-    const remaining = response.headers.get('x-requests-remaining');
-    console.log(`📋 Events API: ${events.length} NHL events, ${remaining} credits left`);
+    const getTeamName = (team: any) => {
+      if (!team) return 'Unknown';
+      if (team.placeName?.default && team.commonName?.default) {
+        return `${team.placeName.default} ${team.commonName.default}`;
+      }
+      return team.abbrev || 'Unknown';
+    };
     
-    eventsCache = { events, timestamp: Date.now() };
-    return events;
-  } catch (error: any) {
-    console.log(`❌ Events error: ${error.message}`);
-    return eventsCache.events;
-  }
-}
-
-async function fetchPlayerPropsOdds(propType: string): Promise<Map<string, any>> {
-  const oddsMap = new Map();
-  
-  if (!ODDS_API_KEY) {
-    console.log('⚠️ No ODDS_API_KEY - skipping book odds');
-    return oddsMap;
-  }
-  
-  // Check cache (6 hour TTL to save credits)
-  const cacheKey = `props_${propType}`;
-  const cached = propsCache.data.get(cacheKey);
-  if (cached && Date.now() - propsCache.timestamp < PROPS_CACHE_TTL) {
-    console.log(`✅ Using cached ${propType} odds (${cached.size} players)`);
-    return cached;
-  }
-  
-  // Map prop type to Odds API market
-  const marketMap: Record<string, string> = {
-    'goalscorer': 'player_goal_scorer_anytime',  // Anytime goalscorer
-    'shots': 'player_shots_on_goal',
-    'points': 'player_points',
-    'assists': 'player_assists',
-  };
-  
-  const market = marketMap[propType];
-  if (!market) {
-    console.log(`⚠️ No market mapping for ${propType}`);
-    return oddsMap;
-  }
-  
-  try {
-    // Step 1: Get list of events (uses 1 credit, cached for 1 hour)
-    const events = await fetchNHLEvents();
-    
-    if (events.length === 0) {
-      console.log('⚠️ No NHL events found');
-      return cached || oddsMap;
-    }
-    
-    // Filter to today's events only (to save credits)
-    const now = new Date();
-    const todayStart = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    todayStart.setHours(0, 0, 0, 0);
-    const tomorrowStart = new Date(todayStart);
-    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
-    
-    const todayEvents = events.filter((e: any) => {
-      const eventTime = new Date(e.commence_time);
-      return eventTime >= todayStart && eventTime < tomorrowStart;
-    });
-    
-    console.log(`🔄 Fetching ${propType} props for ${todayEvents.length} today's games...`);
-    
-    // Step 2: Fetch player props for each event (1 credit per event per market)
-    // Limit to max 2 games to stay within 500 free credits/month
-    const eventsToFetch = todayEvents.slice(0, 2);
-    
-    let totalPlayersFound = 0;
-    
-    for (const event of eventsToFetch) {
-      try {
-        const eventUrl = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/events/${event.id}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=${market}&bookmakers=draftkings,fanduel`;
+    // Process both teams
+    const processPlayers = async (players: any[], teamAbbrev: string, isHome: boolean, opponentGoalieSv: number) => {
+      for (const player of players) {
+        const name = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
+        if (isPlayerInjured(name, teamAbbrev)) continue;
         
-        const response = await fetchWithTimeout(eventUrl, 8000);
+        const gamesPlayed = player.gamesPlayed || 1;
+        const goals = player.goals || 0;
+        const shots = player.shots || 0;
+        const assists = player.assists || 0;
+        const points = player.points || 0;
+        const ppGoals = player.powerPlayGoals || 0;
         
-        if (!response.ok) {
-          console.log(`❌ Event ${event.id} props: ${response.status}`);
-          continue;
+        if (gamesPlayed < 10) continue;
+        
+        // Base stats per game
+        const goalsPerGame = goals / gamesPlayed;
+        const shotsPerGame = shots / gamesPlayed;
+        const assistsPerGame = assists / gamesPlayed;
+        const pointsPerGame = points / gamesPlayed;
+        
+        // Filter based on prop type
+        if (propType === 'goalscorer' && goalsPerGame < 0.05) continue;
+        if (propType === 'shots' && shotsPerGame < 1.5) continue;
+        if (propType === 'assists' && assistsPerGame < 0.1) continue;
+        if (propType === 'points' && pointsPerGame < 0.2) continue;
+        
+        // Calculate base lambda based on prop type
+        let baseLambda: number;
+        let defaultLine: number;
+        
+        switch (propType) {
+          case 'goalscorer':
+            baseLambda = goalsPerGame;
+            defaultLine = 0.5;
+            break;
+          case 'shots':
+            baseLambda = shotsPerGame;
+            defaultLine = 2.5;
+            break;
+          case 'assists':
+            baseLambda = assistsPerGame;
+            defaultLine = 0.5;
+            break;
+          case 'points':
+            baseLambda = pointsPerGame;
+            defaultLine = 0.5;
+            break;
+          default:
+            baseLambda = goalsPerGame;
+            defaultLine = 0.5;
         }
         
-        const data = await response.json();
-        const remaining = response.headers.get('x-requests-remaining');
+        // ========== APPLY ALL 10 ADJUSTMENTS ==========
         
-        // Parse bookmakers
-        for (const bookmaker of data.bookmakers || []) {
-          const marketData = bookmaker.markets?.find((m: any) => m.key === market);
-          if (!marketData) continue;
-          
-          for (const outcome of marketData.outcomes || []) {
-            // For anytime goalscorer, the player name is in 'description' or 'name'
-            const playerName = outcome.description || outcome.name;
-            if (!playerName || playerName === 'Over' || playerName === 'Under') continue;
-            
-            const line = outcome.point ?? 0.5;
-            const odds = outcome.price || 0;
-            
-            // Normalize player name for matching
-            const key = playerName.toLowerCase().trim();
-            
-            if (!oddsMap.has(key)) {
-              oddsMap.set(key, { 
-                over: 0, 
-                under: 0, 
-                line,
-                bookmaker: bookmaker.title,
-                homeTeam: event.home_team,
-                awayTeam: event.away_team,
-              });
-            }
-            
-            const entry = oddsMap.get(key);
-            
-            // For anytime goalscorer, there's typically just one price (to score)
-            if (market === 'player_goal_scorer_anytime') {
-              entry.over = odds; // The odds TO score
-              entry.line = 0.5;
-            } else {
-              // For O/U props (shots, points, assists)
-              if (outcome.name === 'Over') {
-                entry.over = odds;
-                entry.line = line;
-              } else if (outcome.name === 'Under') {
-                entry.under = odds;
+        // 1. Home/Away adjustment
+        const homeAwayAdj = isHome ? 1.05 : 0.95;
+        
+        // 2. Back-to-back adjustment
+        const b2bAdj = 1.0; // TODO: Check actual schedule
+        
+        // 3. Opposing goalie adjustment (for goals only)
+        const goalieAdj = propType === 'goalscorer' ? getGoalieAdjustment(opponentGoalieSv) : 1.0;
+        
+        // 4. Line promotion boost
+        let linePromotionAdj = 1.0;
+        try {
+          linePromotionAdj = await getLinePromotionBoost(name, teamAbbrev);
+        } catch { /* ignore */ }
+        
+        // 5. Linemate injury adjustment
+        let linemateInjuryAdj = 1.0;
+        try {
+          const linemates = await getLinemates(name, teamAbbrev);
+          for (const lm of linemates) {
+            if (isPlayerInjured(lm, teamAbbrev)) {
+              const tier = quickTierCheck(goalsPerGame, gamesPlayed);
+              if (tier === 'elite' || tier === 'star') {
+                linemateInjuryAdj *= 0.75;
               }
             }
-            
-            totalPlayersFound++;
           }
+        } catch { /* ignore */ }
+        
+        // 6. Vegas total adjustment
+        const vegasTotalAdj = 1.0;
+        
+        // 7. Shot volume adjustment
+        let shotVolumeAdj = 1.0;
+        if (shotsPerGame >= 4.0) shotVolumeAdj = 1.08;
+        else if (shotsPerGame >= 3.0) shotVolumeAdj = 1.04;
+        else if (shotsPerGame < 2.0) shotVolumeAdj = 0.96;
+        
+        // 8. Power play boost
+        let ppBoost = 1.0;
+        const ppGoalRate = gamesPlayed > 0 ? ppGoals / gamesPlayed : 0;
+        if (ppGoalRate >= 0.2) ppBoost = 1.06;
+        else if (ppGoalRate >= 0.1) ppBoost = 1.03;
+        
+        // 9. Opponent defense adjustment
+        const opponentAdj = 1.0;
+        
+        // 10. Recent form adjustment
+        const recentFormAdj = 1.0;
+        
+        // Calculate final lambda
+        const finalLambda = baseLambda * homeAwayAdj * b2bAdj * goalieAdj * 
+          linePromotionAdj * linemateInjuryAdj * vegasTotalAdj * 
+          shotVolumeAdj * ppBoost * opponentAdj * recentFormAdj;
+        
+        // Calculate probability
+        let probability: number;
+        if (propType === 'goalscorer' || propType === 'assists' || propType === 'points') {
+          probability = poissonAtLeastOne(finalLambda);
+        } else {
+          // For shots, calculate probability of hitting over the line
+          const line = 2.5; // Default line
+          probability = 1 - poissonCDF(line, finalLambda);
         }
         
-        console.log(`  ✅ ${event.home_team} vs ${event.away_team}: found props, ${remaining} credits left`);
+        // Get player line info (PP1 status)
+        let isPP1 = false;
+        try {
+          const lineInfo = await getPlayerLine(name, teamAbbrev);
+          isPP1 = lineInfo.isPP1;
+        } catch { /* ignore */ }
         
-      } catch (eventError: any) {
-        console.log(`  ❌ Event error: ${eventError.message}`);
+        // Calculate dynamic confidence
+        const confidence = calculateDynamicConfidence(
+          goalsPerGame,
+          gamesPlayed,
+          shotsPerGame,
+          isPP1,
+          linemateInjuryAdj < 1.0,
+          opponentGoalieSv >= 0.920,
+          b2bAdj < 1.0
+        );
+        
+        // Get book odds for this player
+        const playerOdds = getPlayerBookOdds(name, bookOdds);
+        const bookOddsValue = playerOdds?.odds || null;
+        const bookLine = playerOdds?.line || defaultLine;
+        
+        // Classify the bet
+        const betAnalysis = classifyBet(
+          probability,
+          bookOddsValue,
+          bookLine,
+          propType as any,
+          confidence
+        );
+        
+        predictions.push({
+          playerId: player.playerId,
+          playerName: name,
+          team: getTeamName(isHome ? game.homeTeam : game.awayTeam),
+          teamAbbrev,
+          opponent: getTeamName(isHome ? game.awayTeam : game.homeTeam),
+          opponentAbbrev: isHome ? awayAbbrev : homeAbbrev,
+          gameTime,
+          isHome,
+          propType,
+          expectedValue: finalLambda,
+          probability,
+          line: bookLine,
+          confidence,
+          betClassification: betAnalysis.classification,
+          edge: betAnalysis.edge,
+          edgePercent: betAnalysis.edgePercent,
+          bookOdds: bookOddsValue,
+          bookLine: betAnalysis.bookLine,
+          fairOdds: betAnalysis.fairOdds,
+          expectedProfit: betAnalysis.expectedValue,
+          breakdown: {
+            basePrediction: baseLambda,
+            homeAwayAdj,
+            backToBackAdj: b2bAdj,
+            opponentAdj,
+            goalieAdj,
+            linePromotionAdj,
+            linemateInjuryAdj,
+            vegasTotalAdj,
+            shotVolumeAdj,
+            ppBoost,
+            finalPrediction: finalLambda,
+          },
+        });
+        playerCount++;
       }
-    }
+    };
     
-    // Update cache
-    if (oddsMap.size > 0) {
-      propsCache.data.set(cacheKey, oddsMap);
-      propsCache.timestamp = Date.now();
-      console.log(`💾 Cached ${oddsMap.size} player ${propType} odds`);
-    }
+    // Process home team (facing away goalie)
+    await processPlayers(homePlayers, homeAbbrev, true, awayGoalieSv);
     
-    return oddsMap;
+    // Process away team (facing home goalie)
+    await processPlayers(awayPlayers, awayAbbrev, false, homeGoalieSv);
     
-  } catch (error: any) {
-    console.log(`❌ Props odds error: ${error.message}`);
-    return cached || oddsMap;
-  }
-}
-
-// ============ PROCESS PLAYERS ============
-
-async function processSkaterProps(
-  players: any[],
-  teamAbbrev: string,
-  teamName: string,
-  opponentAbbrev: string,
-  opponentName: string,
-  gameTime: string,
-  isHome: boolean,
-  propType: string,
-  bookOddsMap: Map<string, any>,
-  injuredNames: Set<string>
-): Promise<PropPrediction[]> {
-  const predictions: PropPrediction[] = [];
-  
-  for (const player of players) {
-    try {
-      const name = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
-      if (!name) continue;
-      
-      // Skip injured players - normalize EXACTLY like injury-service.ts does
-      const normalizedName = name
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toLowerCase()
-        .replace(/\s+(jr|sr|ii|iii|iv)\.?$/i, '')
-        .replace(/[^a-z\s-]/g, '')
-        .trim();
-      if (injuredNames.has(normalizedName)) {
-        console.log(`🏥 Skipping injured player: ${name}`);
-        continue;
-      }
-      
-      const gamesPlayed = player.gamesPlayed || 0;
-      if (gamesPlayed < 10) continue;
-      
-      let baseLambda = 0;
-      let line = 0.5;
-      
-      // Calculate expected value based on prop type
-      switch (propType) {
-        case 'goalscorer':
-          baseLambda = (player.goals || 0) / gamesPlayed;
-          line = 0.5;
-          if (baseLambda < 0.05) continue;
-          break;
-        case 'shots':
-          baseLambda = (player.shots || 0) / gamesPlayed;
-          line = 2.5; // Default line
-          if (baseLambda < 1.0) continue;
-          break;
-        case 'points':
-          baseLambda = (player.points || 0) / gamesPlayed;
-          line = 0.5;
-          if (baseLambda < 0.15) continue;
-          break;
-        case 'assists':
-          baseLambda = (player.assists || 0) / gamesPlayed;
-          line = 0.5;
-          if (baseLambda < 0.10) continue;
-          break;
-      }
-      
-      // Get injury adjustment for this player (linemate effects, line shuffling)
-      const injuryAdj = await getPlayerPropsAdjustment(name, teamAbbrev);
-      
-      // Apply adjustments
-      const homeAwayAdj = isHome ? 1.05 : 0.95;
-      const linemateAdj = injuryAdj.productionMultiplier; // e.g., 0.75 if linemate injured
-      const finalLambda = baseLambda * homeAwayAdj * linemateAdj;
-      
-      // Calculate probability
-      let probability: number;
-      if (propType === 'goalscorer') {
-        probability = poissonAtLeastOne(finalLambda);
-      } else {
-        probability = poissonOver(finalLambda, line);
-      }
-      
-      // Confidence (reduce if affected by injuries)
-      let confidence = 0.3;
-      if (ELITE_SCORERS.has(name)) confidence += 0.35;
-      else if (baseLambda >= 0.35) confidence += 0.25;
-      else if (baseLambda >= 0.20) confidence += 0.15;
-      if (gamesPlayed >= 30) confidence += 0.15;
-      if (injuryAdj.reason) confidence -= 0.1; // Less confident when linemate injured
-      confidence = Math.max(0.2, Math.min(0.95, confidence));
-      
-      // Get book odds
-      const bookKey = name.toLowerCase().trim();
-      const bookOdds = bookOddsMap.get(bookKey);
-      
-      predictions.push({
-        playerId: player.playerId || Math.floor(Math.random() * 100000),
-        playerName: name,
-        team: teamName,
-        teamAbbrev,
-        opponent: opponentName,
-        opponentAbbrev,
-        gameTime,
-        isHome,
-        propType,
-        expectedValue: finalLambda,
-        probability,
-        line,
-        confidence,
-        isValueBet: false,
-        bookOdds: bookOdds || undefined,
-        injuryNote: injuryAdj.reason || undefined,
-      });
-    } catch (e) {
-      // Skip problematic players
-    }
+    console.log(`  Generated ${predictions.length} predictions`);
+  } catch (error) {
+    console.error('Error processing game:', error);
   }
   
-  return predictions;
+  return { predictions, playerCount };
 }
 
-function processGoalieProps(
-  goalies: any[],
-  teamAbbrev: string,
-  teamName: string,
-  opponentAbbrev: string,
-  opponentName: string,
-  gameTime: string,
-  isHome: boolean,
-  opponentShotsPerGame: number,
-  opponentGoalsPerGame: number
-): GoaliePrediction[] {
-  const predictions: GoaliePrediction[] = [];
-  
-  for (const goalie of goalies) {
-    try {
-      const name = `${goalie.firstName?.default || ''} ${goalie.lastName?.default || ''}`.trim();
-      if (!name) continue;
-      
-      const gamesPlayed = goalie.gamesPlayed || 0;
-      if (gamesPlayed < 5) continue;
-      
-      const savePct = goalie.savePctg || 0.900;
-      const gaa = goalie.goalsAgainstAverage || 3.0;
-      
-      // Expected saves = opponent shots × save %
-      const expectedShots = opponentShotsPerGame * (isHome ? 0.97 : 1.03); // Slight home advantage
-      const expectedSaves = expectedShots * savePct;
-      const savesLine = Math.round(expectedSaves * 2) / 2; // Round to .5
-      
-      // Expected GA
-      const expectedGA = opponentGoalsPerGame * (isHome ? 0.95 : 1.05);
-      const gaLine = Math.round(expectedGA * 2) / 2;
-      
-      // Saves probabilities (normal distribution, std dev ~4)
-      const savesOverProb = 1 - normalCDF(savesLine, expectedSaves, 4);
-      const savesUnderProb = normalCDF(savesLine, expectedSaves, 4);
-      
-      // GA probabilities (Poisson)
-      const gaOverProb = poissonOver(expectedGA, gaLine);
-      const gaUnderProb = 1 - gaOverProb;
-      
-      // Is starter? (most games played = likely starter)
-      const isStarter = gamesPlayed >= 20;
-      
-      // Confidence
-      let confidence = 0.4;
-      if (gamesPlayed >= 30) confidence += 0.2;
-      if (savePct >= 0.910) confidence += 0.15;
-      confidence = Math.min(0.85, confidence);
-      
-      predictions.push({
-        playerId: goalie.playerId || Math.floor(Math.random() * 100000),
-        playerName: name,
-        team: teamName,
-        teamAbbrev,
-        opponent: opponentName,
-        opponentAbbrev,
-        gameTime,
-        isHome,
-        isStarter,
-        expectedSaves,
-        savesLine,
-        savesOverProb,
-        savesUnderProb,
-        expectedGA,
-        gaLine,
-        gaOverProb,
-        gaUnderProb,
-        confidence,
-        isValueBet: false,
-      });
-    } catch (e) {
-      // Skip problematic goalies
-    }
+// Poisson CDF helper
+function poissonCDF(k: number, lambda: number): number {
+  let sum = 0;
+  for (let i = 0; i <= Math.floor(k); i++) {
+    sum += Math.pow(lambda, i) * Math.exp(-lambda) / factorial(i);
   }
-  
-  return predictions;
+  return sum;
 }
 
-// ============ MAIN HANDLER ============
+function factorial(n: number): number {
+  if (n <= 1) return 1;
+  return n * factorial(n - 1);
+}
 
 export async function GET(request: Request) {
-  const startTime = Date.now();
-  const { searchParams } = new URL(request.url);
-  const propType = searchParams.get('type') || 'goalscorer';
-  
   try {
-    console.log(`🏒 Props API started (type: ${propType})`);
+    const { searchParams } = new URL(request.url);
+    const propType = searchParams.get('propType') || searchParams.get('type') || 'goalscorer';
     
-    // Refresh injury cache and get injured names (MUST await - it's async now!)
-    await refreshInjuryCache().catch(e => console.log('⚠️ Injury refresh error:', e.message));
-    const injuredNames = await getInjuredPlayerNames();
-    console.log(`🏥 ${injuredNames.size} injured players will be filtered out`);
+    console.log(`\n🏒 Props API called for: ${propType}`);
     
-    // Debug: log some injured names
-    if (injuredNames.size > 0) {
-      const sampleNames = Array.from(injuredNames).slice(0, 5);
-      console.log(`🏥 Sample injured: ${sampleNames.join(', ')}`);
-    } else {
-      console.log('⚠️ WARNING: No injured players in cache - filter may not work!');
-    }
+    // Fetch book odds for this prop type
+    const bookOdds = await fetchBookOdds(propType);
     
-    // Get schedule
+    // Try multiple schedule endpoints
     let schedData: any = null;
+    
     try {
-      const schedRes = await fetchWithTimeout('https://api-web.nhle.com/v1/schedule/now', 8000);
-      if (schedRes.ok) {
-        schedData = await schedRes.json();
+      const res1 = await fetch('https://api-web.nhle.com/v1/schedule/now', {
+        headers: { 'Accept': 'application/json' }
+      });
+      if (res1.ok) {
+        schedData = await res1.json();
       }
     } catch (e) {
-      console.log('⚠️ Schedule fetch failed');
+      console.log('Schedule/now failed, trying alternative...');
     }
     
-    if (!schedData?.gameWeek) {
+    if (!schedData || !schedData.gameWeek) {
+      const today = new Date().toISOString().split('T')[0];
+      try {
+        const res2 = await fetch(`https://api-web.nhle.com/v1/schedule/${today}`, {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (res2.ok) {
+          schedData = await res2.json();
+        }
+      } catch (e) {
+        console.log('Schedule by date also failed');
+      }
+    }
+    
+    if (!schedData || !schedData.gameWeek) {
       return NextResponse.json({
-        predictions: [],
-        valueBets: [],
+        predictions: [], 
+        valueBets: [], 
         lastUpdated: new Date().toISOString(),
-        gamesAnalyzed: 0,
-        playersAnalyzed: 0,
-        message: 'Unable to fetch schedule.',
+        gamesAnalyzed: 0, 
+        playersAnalyzed: 0, 
+        message: 'No games scheduled today. Check back tomorrow!',
       });
     }
     
-    // Get today in ET
-    const now = new Date();
-    const etDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const todayStr = etDate.toISOString().split('T')[0];
+    const gameWeek = schedData.gameWeek || [];
     
-    // Find today's games
+    // Find first day with games
     let todayGames: any[] = [];
     let gameDate = '';
     
-    for (const day of schedData.gameWeek || []) {
-      if (day.date < todayStr) continue;
-      if (day.games?.length > 0) {
+    for (const day of gameWeek) {
+      if (day.games && day.games.length > 0) {
         todayGames = day.games;
         gameDate = day.date;
         break;
@@ -623,232 +554,79 @@ export async function GET(request: Request) {
     
     if (!todayGames.length) {
       return NextResponse.json({
-        predictions: [],
-        valueBets: [],
+        predictions: [], 
+        valueBets: [], 
         lastUpdated: new Date().toISOString(),
-        gamesAnalyzed: 0,
+        gamesAnalyzed: 0, 
         playersAnalyzed: 0,
-        message: 'No games scheduled.',
+        message: 'No games scheduled. Check back later!',
       });
     }
     
-    console.log(`📅 Found ${todayGames.length} games for ${gameDate}`);
+    console.log(`Processing ${todayGames.length} games for ${gameDate}...`);
     
-    // Fetch book odds (only for skater props)
-    let bookOddsMap = new Map();
-    if (propType !== 'goalie' && ODDS_API_KEY) {
-      bookOddsMap = await fetchPlayerPropsOdds(propType);
-    }
-    
-    // Collect teams
-    const teamsToFetch = new Set<string>();
-    for (const game of todayGames) {
-      if (game.homeTeam?.abbrev) teamsToFetch.add(game.homeTeam.abbrev);
-      if (game.awayTeam?.abbrev) teamsToFetch.add(game.awayTeam.abbrev);
-    }
-    
-    // Fetch all team stats in parallel
-    const teamStatsMap = new Map<string, any[]>();
-    const goalieStatsMap = new Map<string, any[]>();
-    
-    await Promise.all(
-      Array.from(teamsToFetch).map(async (abbrev) => {
-        if (propType === 'goalie') {
-          const goalies = await getGoalieStats(abbrev);
-          goalieStatsMap.set(abbrev, goalies);
-        }
-        const players = await getPlayerStats(abbrev);
-        teamStatsMap.set(abbrev, players);
-      })
+    const results = await Promise.all(
+      todayGames.map((game: any) => processGame(game, propType, bookOdds))
     );
     
-    console.log(`✅ Fetched ${teamStatsMap.size} teams in ${Date.now() - startTime}ms`);
+    const allPredictions: PropPrediction[] = [];
+    let totalPlayers = 0;
     
-    // Process all games
-    if (propType === 'goalie') {
-      // Goalie props
-      const allPredictions: GoaliePrediction[] = [];
-      
-      for (const game of todayGames) {
-        const homeAbbrev = game.homeTeam?.abbrev;
-        const awayAbbrev = game.awayTeam?.abbrev;
-        if (!homeAbbrev || !awayAbbrev) continue;
-        
-        const getTeamName = (team: any) => {
-          if (team?.placeName?.default && team?.commonName?.default) {
-            return `${team.placeName.default} ${team.commonName.default}`;
-          }
-          return team?.abbrev || 'Unknown';
-        };
-        
-        let gameTime = 'TBD';
-        if (game.startTimeUTC) {
-          gameTime = new Date(game.startTimeUTC).toLocaleTimeString('en-US', {
-            hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York',
-          });
-        }
-        
-        // Get opponent stats for expected shots/goals
-        const homeSkaters = teamStatsMap.get(homeAbbrev) || [];
-        const awaySkaters = teamStatsMap.get(awayAbbrev) || [];
-        
-        // Calculate team averages
-        const homeShots = homeSkaters.reduce((sum, p) => sum + (p.shots || 0), 0) / 
-          Math.max(1, homeSkaters[0]?.gamesPlayed || 40);
-        const awayShots = awaySkaters.reduce((sum, p) => sum + (p.shots || 0), 0) / 
-          Math.max(1, awaySkaters[0]?.gamesPlayed || 40);
-        const homeGoals = homeSkaters.reduce((sum, p) => sum + (p.goals || 0), 0) / 
-          Math.max(1, homeSkaters[0]?.gamesPlayed || 40);
-        const awayGoals = awaySkaters.reduce((sum, p) => sum + (p.goals || 0), 0) / 
-          Math.max(1, awaySkaters[0]?.gamesPlayed || 40);
-        
-        // Home goalies (face away team)
-        const homeGoalies = goalieStatsMap.get(homeAbbrev) || [];
-        const homePreds = processGoalieProps(
-          homeGoalies, homeAbbrev, getTeamName(game.homeTeam),
-          awayAbbrev, getTeamName(game.awayTeam), gameTime, true,
-          awayShots || 30, awayGoals || 3
-        );
-        
-        // Away goalies (face home team)
-        const awayGoalies = goalieStatsMap.get(awayAbbrev) || [];
-        const awayPreds = processGoalieProps(
-          awayGoalies, awayAbbrev, getTeamName(game.awayTeam),
-          homeAbbrev, getTeamName(game.homeTeam), gameTime, false,
-          homeShots || 30, homeGoals || 3
-        );
-        
-        allPredictions.push(...homePreds, ...awayPreds);
-      }
-      
-      // Sort by confidence
-      allPredictions.sort((a, b) => b.confidence - a.confidence);
-      
-      // Mark value bets (starters with high confidence)
-      const valueBets = allPredictions
-        .filter(p => p.isStarter && p.confidence >= 0.55)
-        .slice(0, 4)
-        .map(p => ({ ...p, isValueBet: true }));
-      
-      return NextResponse.json({
-        predictions: allPredictions,
-        valueBets,
-        lastUpdated: new Date().toISOString(),
-        gamesAnalyzed: todayGames.length,
-        fetchTimeMs: Date.now() - startTime,
-      });
-      
-    } else {
-      // Skater props (goalscorer, shots, points, assists)
-      const allPredictions: PropPrediction[] = [];
-      
-      for (const game of todayGames) {
-        const homeAbbrev = game.homeTeam?.abbrev;
-        const awayAbbrev = game.awayTeam?.abbrev;
-        if (!homeAbbrev || !awayAbbrev) continue;
-        
-        const getTeamName = (team: any) => {
-          if (team?.placeName?.default && team?.commonName?.default) {
-            return `${team.placeName.default} ${team.commonName.default}`;
-          }
-          return team?.abbrev || 'Unknown';
-        };
-        
-        let gameTime = 'TBD';
-        if (game.startTimeUTC) {
-          gameTime = new Date(game.startTimeUTC).toLocaleTimeString('en-US', {
-            hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/New_York',
-          });
-        }
-        
-        const homePlayers = teamStatsMap.get(homeAbbrev) || [];
-        const awayPlayers = teamStatsMap.get(awayAbbrev) || [];
-        
-        const homePreds = await processSkaterProps(
-          homePlayers, homeAbbrev, getTeamName(game.homeTeam),
-          awayAbbrev, getTeamName(game.awayTeam), gameTime, true,
-          propType, bookOddsMap, injuredNames
-        );
-        
-        const awayPreds = await processSkaterProps(
-          awayPlayers, awayAbbrev, getTeamName(game.awayTeam),
-          homeAbbrev, getTeamName(game.homeTeam), gameTime, false,
-          propType, bookOddsMap, injuredNames
-        );
-        
-        allPredictions.push(...homePreds, ...awayPreds);
-      }
-      
-      // Sort by probability
-      allPredictions.sort((a, b) => b.probability - a.probability);
-      
-      // Calculate edge when we have book odds
-      // Edge = Model Probability - Book Implied Probability
-      const predictionsWithEdge = allPredictions.map(p => {
-        let edge = 0;
-        let bookImpliedProb = 0;
-        
-        if (p.bookOdds?.over) {
-          // Convert American odds to implied probability
-          const odds = p.bookOdds.over;
-          if (odds > 0) {
-            bookImpliedProb = 100 / (odds + 100);
-          } else {
-            bookImpliedProb = Math.abs(odds) / (Math.abs(odds) + 100);
-          }
-          edge = p.probability - bookImpliedProb;
-        }
-        
-        return {
-          ...p,
-          edge: Math.round(edge * 100) / 100, // e.g., 0.08 = 8% edge
-          bookImpliedProb: Math.round(bookImpliedProb * 100) / 100,
-        };
-      });
-      
-      // Mark value bets: edge > 5% AND confidence > 50% AND has book odds
-      const valueBets = predictionsWithEdge
-        .filter(p => p.edge > 0.05 && p.confidence >= 0.50 && p.bookOdds)
-        .sort((a, b) => b.edge - a.edge)
-        .slice(0, 10)
-        .map(p => ({ ...p, isValueBet: true }));
-      
-      // If no edge-based value bets, fall back to top picks by probability
-      const topPicks = valueBets.length > 0 ? valueBets : predictionsWithEdge
-        .filter(p => p.probability >= 0.20 && p.confidence >= 0.45)
-        .slice(0, 10)
-        .map(p => ({ ...p, isValueBet: true }));
-      
-      const topPickIds = new Set(topPicks.map(p => p.playerId));
-      const markedPredictions = predictionsWithEdge.map(p => ({
-        ...p,
-        isValueBet: topPickIds.has(p.playerId),
-      }));
-      
-      console.log(`📊 Generated ${allPredictions.length} ${propType} predictions`);
-      console.log(`💰 Found ${valueBets.length} value bets with edge > 5%`);
-      
-      return NextResponse.json({
-        predictions: markedPredictions,
-        valueBets: topPicks,
-        lastUpdated: new Date().toISOString(),
-        gamesAnalyzed: todayGames.length,
-        playersAnalyzed: allPredictions.length,
-        gameDate,
-        fetchTimeMs: Date.now() - startTime,
-        oddsSource: valueBets.length > 0 ? 'live' : 'model-only',
-      });
+    for (const result of results) {
+      allPredictions.push(...result.predictions);
+      totalPlayers += result.playerCount;
     }
     
-  } catch (error: any) {
-    console.error('❌ Props API error:', error);
+    console.log(`Total: ${allPredictions.length} predictions from ${totalPlayers} players`);
+    
+    // Sort by probability
+    allPredictions.sort((a, b) => b.probability - a.probability);
+    
+    // Get bets by classification
+    const bestValueBets = allPredictions.filter(p => p.betClassification === 'best_value');
+    const valueBets = allPredictions.filter(p => p.betClassification === 'value');
+    const bestBets = allPredictions.filter(p => p.betClassification === 'best');
+    
+    // Combined top picks
+    const topPicks = [
+      ...bestValueBets,
+      ...valueBets.slice(0, 5),
+      ...bestBets.slice(0, 5),
+    ].slice(0, 10);
+    
+    // Count bets with book odds
+    const withBookOdds = allPredictions.filter(p => p.bookOdds !== null).length;
+    
     return NextResponse.json({
-      predictions: [],
-      valueBets: [],
+      predictions: allPredictions,
+      valueBets: topPicks,
+      bestValueBets,
+      valueBetsOnly: valueBets,
+      bestBetsOnly: bestBets,
       lastUpdated: new Date().toISOString(),
-      gamesAnalyzed: 0,
-      playersAnalyzed: 0,
-      error: 'Failed to generate predictions.',
+      gamesAnalyzed: todayGames.length,
+      playersAnalyzed: totalPlayers,
+      playersWithBookOdds: withBookOdds,
+      bookOddsAvailable: withBookOdds > 0,
+      gameDate,
+      propType,
+      betSummary: {
+        bestValue: bestValueBets.length,
+        value: valueBets.length,
+        best: bestBets.length,
+        total: bestValueBets.length + valueBets.length + bestBets.length,
+      },
+    });
+    
+  } catch (error) {
+    console.error('Error in props API:', error);
+    return NextResponse.json({
+      predictions: [], 
+      valueBets: [], 
+      lastUpdated: new Date().toISOString(),
+      gamesAnalyzed: 0, 
+      playersAnalyzed: 0, 
+      error: 'Failed to generate predictions'
     });
   }
 }
