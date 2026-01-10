@@ -1,24 +1,10 @@
 'use client';
 
-interface InjuryImpact {
-  homeStarsOut: string[];
-  awayStarsOut: string[];
-  homeAdjustment: number;
-  awayAdjustment: number;
-  homeSummary: string;
-  awaySummary: string;
-  homeGoalie: string;
-  awayGoalie: string;
-  compoundingWarning?: string;
-  homePPImpact: number;
-  awayPPImpact: number;
-}
-
 interface GameRowProps {
   game: {
     id: string;
-    homeTeam: { id?: number; name: string; abbreviation: string; isB2B?: boolean; };
-    awayTeam: { id?: number; name: string; abbreviation: string; isB2B?: boolean; };
+    homeTeam: { id?: number; name: string; abbreviation: string; injuries?: string[]; };
+    awayTeam: { id?: number; name: string; abbreviation: string; injuries?: string[]; };
     startTime: string;
     status: string;
     prediction?: {
@@ -26,21 +12,28 @@ interface GameRowProps {
       awayWinProbability: number;
       predictedTotal: number;
       confidence: number;
-      injuryImpact?: InjuryImpact | null;
-      isHomeB2B?: boolean;
-      isAwayB2B?: boolean;
+      factors?: {
+        goalDiff: number;
+        homeIce: number;
+        rest: number;
+        pointsPct: number;
+        injury: number;
+      };
     };
-    odds?: {
+    odds?: Array<{
       bookmaker: string;
       homeMoneyline: number;
       awayMoneyline: number;
-      homeSpread: number;
+      homeSpreadLine?: string;
+      awaySpreadLine?: string;
       homeSpreadOdds: number;
       awaySpreadOdds: number;
       totalLine: number;
+      overLine?: string;
+      underLine?: string;
       overOdds: number;
       underOdds: number;
-    }[];
+    }>;
   };
 }
 
@@ -67,11 +60,6 @@ function formatTime(dateString: string): string {
   }
 }
 
-function formatOdds(odds: number): string {
-  if (!odds || odds === 0) return '-';
-  return odds > 0 ? `+${odds}` : `${odds}`;
-}
-
 function probToOdds(prob: number): string {
   if (prob >= 0.5) {
     return Math.round(-100 * prob / (1 - prob)).toString();
@@ -79,14 +67,9 @@ function probToOdds(prob: number): string {
   return `+${Math.round(100 * (1 - prob) / prob)}`;
 }
 
-// Convert American odds to implied probability
-function oddsToProb(americanOdds: number): number {
-  if (americanOdds === 0) return 0.5;
-  if (americanOdds > 0) {
-    return 100 / (americanOdds + 100);
-  } else {
-    return Math.abs(americanOdds) / (Math.abs(americanOdds) + 100);
-  }
+function formatOdds(odds: number): string {
+  if (odds === 0) return '-';
+  return odds > 0 ? `+${odds}` : `${odds}`;
 }
 
 export default function GameRow({ game }: GameRowProps) {
@@ -95,46 +78,12 @@ export default function GameRow({ game }: GameRowProps) {
     awayWinProbability: 0.5,
     predictedTotal: 5.5,
     confidence: 0.5,
-    injuryImpact: null,
   };
-  
-  const injuryImpact = prediction.injuryImpact;
-  const odds = game.odds?.[0]; // Get first bookmaker (DraftKings)
-  const hasOdds = odds && (odds.homeMoneyline !== 0 || odds.awayMoneyline !== 0);
   
   const homeProb = prediction.homeWinProbability;
   const awayProb = prediction.awayWinProbability;
   const favoriteAbbrev = homeProb > awayProb ? game.homeTeam.abbreviation : game.awayTeam.abbreviation;
   const favoriteProb = Math.max(homeProb, awayProb);
-  
-  // Format injury adjustment display (e.g., "-3.2%")
-  const formatInjuryAdj = (adj: number): string => {
-    if (!adj || adj === 0) return '';
-    return adj > 0 ? `+${adj}%` : `${adj}%`;
-  };
-  
-  // Get first star name for display (e.g., "McDavid out" instead of full array)
-  const getInjuryNote = (starsOut: string[], adjustment: number): string | null => {
-    if (!starsOut || starsOut.length === 0 || adjustment >= 0) return null;
-    // Extract just the player name (before the tier notation)
-    const firstName = starsOut[0].split(' (')[0];
-    const lastName = firstName.split(' ').pop() || firstName;
-    return `${lastName} out`;
-  };
-  
-  // Calculate edge (value) if we have book odds
-  let homeEdge = 0;
-  let awayEdge = 0;
-  if (hasOdds) {
-    const bookHomeProb = oddsToProb(odds.homeMoneyline);
-    const bookAwayProb = oddsToProb(odds.awayMoneyline);
-    homeEdge = homeProb - bookHomeProb;
-    awayEdge = awayProb - bookAwayProb;
-  }
-  
-  const hasValue = Math.abs(homeEdge) >= 0.05 || Math.abs(awayEdge) >= 0.05;
-  const valuePick = homeEdge > awayEdge ? 'home' : 'away';
-  const valueEdge = Math.max(homeEdge, awayEdge);
   
   const confDisplay = prediction.confidence >= 0.65 
     ? { label: 'High', color: 'text-emerald-400', bg: 'bg-emerald-500/20' }
@@ -142,139 +91,133 @@ export default function GameRow({ game }: GameRowProps) {
     ? { label: 'Medium', color: 'text-yellow-400', bg: 'bg-yellow-500/20' }
     : { label: 'Low', color: 'text-slate-500', bg: 'bg-slate-500/20' };
 
+  const bookOdds = game.odds?.[0];
+  const homeInjuries = game.homeTeam.injuries || [];
+  const awayInjuries = game.awayTeam.injuries || [];
+
   return (
     <div className="bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden hover:border-slate-700 transition-all">
-      {/* Header with time and bookmaker */}
-      <div className="px-4 py-2 border-b border-slate-800/50 flex justify-between items-center">
-        <span className="text-slate-400 text-sm">{formatTime(game.startTime)}</span>
-        {hasOdds && (
-          <span className="text-xs text-slate-500">
-            📊 {odds.bookmaker}
-          </span>
-        )}
+      <div className="p-4">
+        <div className="flex items-start justify-between">
+          {/* Teams */}
+          <div className="flex-1">
+            {/* Away Team */}
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold"
+                style={{ backgroundColor: teamColors[game.awayTeam.abbreviation] || '#374151', color: 'white' }}>
+                {game.awayTeam.abbreviation}
+              </div>
+              <div className="flex-1">
+                <div>
+                  <span className="text-white font-medium">{game.awayTeam.name}</span>
+                  <span className={`ml-2 text-sm ${awayProb > homeProb ? 'text-emerald-400 font-bold' : 'text-slate-400'}`}>
+                    ({Math.round(awayProb * 100)}%)
+                  </span>
+                </div>
+                {awayInjuries.length > 0 && (
+                  <div className="text-xs text-red-400/70 mt-0.5">
+                    🏥 {awayInjuries.slice(0, 2).join(', ')}{awayInjuries.length > 2 ? ` +${awayInjuries.length - 2}` : ''}
+                  </div>
+                )}
+              </div>
+              <div className="text-right">
+                <span className={`font-mono text-sm ${awayProb > homeProb ? 'text-emerald-400' : 'text-slate-400'}`}>
+                  {probToOdds(awayProb)}
+                </span>
+              </div>
+            </div>
+            
+            <div className="text-slate-600 text-xs ml-4 mb-2">@</div>
+            
+            {/* Home Team */}
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold"
+                style={{ backgroundColor: teamColors[game.homeTeam.abbreviation] || '#374151', color: 'white' }}>
+                {game.homeTeam.abbreviation}
+              </div>
+              <div className="flex-1">
+                <div>
+                  <span className="text-white font-medium">{game.homeTeam.name}</span>
+                  <span className={`ml-2 text-sm ${homeProb > awayProb ? 'text-emerald-400 font-bold' : 'text-slate-400'}`}>
+                    ({Math.round(homeProb * 100)}%)
+                  </span>
+                </div>
+                {homeInjuries.length > 0 && (
+                  <div className="text-xs text-red-400/70 mt-0.5">
+                    🏥 {homeInjuries.slice(0, 2).join(', ')}{homeInjuries.length > 2 ? ` +${homeInjuries.length - 2}` : ''}
+                  </div>
+                )}
+              </div>
+              <div className="text-right">
+                <span className={`font-mono text-sm ${homeProb > awayProb ? 'text-emerald-400' : 'text-slate-400'}`}>
+                  {probToOdds(homeProb)}
+                </span>
+              </div>
+            </div>
+          </div>
+          
+          {/* Game Info */}
+          <div className="ml-6 text-right">
+            <div className="text-slate-400 text-sm mb-1">{formatTime(game.startTime)}</div>
+            <div className="text-slate-500 text-xs">
+              Total: <span className="text-white">{prediction.predictedTotal.toFixed(1)}</span>
+            </div>
+            <div className={`text-xs mt-1 px-2 py-0.5 rounded ${confDisplay.bg} ${confDisplay.color}`}>
+              {confDisplay.label}
+            </div>
+          </div>
+        </div>
       </div>
       
-      <div className="p-4">
-        {/* Column Headers */}
-        <div className="grid grid-cols-12 gap-2 mb-2 text-xs text-slate-500">
-          <div className="col-span-5">Team</div>
-          <div className="col-span-2 text-center">Model</div>
-          <div className="col-span-2 text-center">{hasOdds ? 'Book' : 'Fair'}</div>
-          <div className="col-span-3 text-center">Spread / Total</div>
-        </div>
-        
-        {/* Away Team Row */}
-        <div className="grid grid-cols-12 gap-2 items-center mb-3">
-          <div className="col-span-5 flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold"
-              style={{ backgroundColor: teamColors[game.awayTeam.abbreviation] || '#374151', color: 'white' }}>
-              {game.awayTeam.abbreviation}
+      {/* Book Lines + Book Odds Section */}
+      {bookOdds && (
+        <div className="px-4 py-2 bg-slate-800/30 border-t border-slate-800">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-slate-500">{bookOdds.bookmaker}</span>
+            <div className="flex gap-4">
+              {/* Moneyline */}
+              <div className="flex gap-2">
+                <span className="text-slate-400">ML:</span>
+                <span className="text-white font-mono">{formatOdds(bookOdds.awayMoneyline)}</span>
+                <span className="text-slate-600">/</span>
+                <span className="text-white font-mono">{formatOdds(bookOdds.homeMoneyline)}</span>
+              </div>
+              {/* Spread */}
+              <div className="flex gap-2">
+                <span className="text-slate-400">Spread:</span>
+                <span className="text-slate-300">{bookOdds.awaySpreadLine || '+1.5'}</span>
+                <span className="text-white font-mono">({formatOdds(bookOdds.awaySpreadOdds)})</span>
+              </div>
+              {/* Total */}
+              <div className="flex gap-2">
+                <span className="text-slate-400">Total:</span>
+                <span className="text-slate-300">{bookOdds.overLine || `O ${bookOdds.totalLine}`}</span>
+                <span className="text-white font-mono">({formatOdds(bookOdds.overOdds)})</span>
+              </div>
             </div>
-            <div className="flex flex-col">
-              <span className="text-white font-medium text-sm truncate">{game.awayTeam.name}</span>
-              {/* Injury indicator */}
-              {injuryImpact && injuryImpact.awayStarsOut && injuryImpact.awayStarsOut.length > 0 && (
-                <span className="text-red-400 text-xs">
-                  🏥 {formatInjuryAdj(injuryImpact.awayAdjustment)} ({getInjuryNote(injuryImpact.awayStarsOut, injuryImpact.awayAdjustment)})
-                </span>
-              )}
-              {prediction.isAwayB2B && (
-                <span className="text-yellow-500 text-xs">⚡ B2B</span>
-              )}
-            </div>
-          </div>
-          <div className="col-span-2 text-center">
-            <span className={`text-sm font-semibold ${awayProb > homeProb ? 'text-emerald-400' : 'text-slate-400'}`}>
-              {Math.round(awayProb * 100)}%
-            </span>
-          </div>
-          <div className="col-span-2 text-center">
-            <span className={`font-mono text-sm ${hasOdds ? (awayEdge > 0.05 ? 'text-emerald-400' : 'text-white') : 'text-slate-400'}`}>
-              {hasOdds ? formatOdds(odds.awayMoneyline) : probToOdds(awayProb)}
-            </span>
-            {awayEdge > 0.05 && <span className="text-emerald-400 text-xs ml-1">+{Math.round(awayEdge * 100)}%</span>}
-          </div>
-          <div className="col-span-3 text-center text-slate-400 text-sm font-mono">
-            {hasOdds ? `+1.5 (${formatOdds(odds.awaySpreadOdds)})` : '+1.5'}
           </div>
         </div>
-        
-        {/* Home Team Row */}
-        <div className="grid grid-cols-12 gap-2 items-center">
-          <div className="col-span-5 flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold"
-              style={{ backgroundColor: teamColors[game.homeTeam.abbreviation] || '#374151', color: 'white' }}>
-              {game.homeTeam.abbreviation}
-            </div>
-            <div className="flex flex-col">
-              <span className="text-white font-medium text-sm truncate">{game.homeTeam.name}</span>
-              {/* Injury indicator */}
-              {injuryImpact && injuryImpact.homeStarsOut && injuryImpact.homeStarsOut.length > 0 && (
-                <span className="text-red-400 text-xs">
-                  🏥 {formatInjuryAdj(injuryImpact.homeAdjustment)} ({getInjuryNote(injuryImpact.homeStarsOut, injuryImpact.homeAdjustment)})
-                </span>
-              )}
-              {prediction.isHomeB2B && (
-                <span className="text-yellow-500 text-xs">⚡ B2B</span>
-              )}
-            </div>
-          </div>
-          <div className="col-span-2 text-center">
-            <span className={`text-sm font-semibold ${homeProb > awayProb ? 'text-emerald-400' : 'text-slate-400'}`}>
-              {Math.round(homeProb * 100)}%
-            </span>
-          </div>
-          <div className="col-span-2 text-center">
-            <span className={`font-mono text-sm ${hasOdds ? (homeEdge > 0.05 ? 'text-emerald-400' : 'text-white') : 'text-slate-400'}`}>
-              {hasOdds ? formatOdds(odds.homeMoneyline) : probToOdds(homeProb)}
-            </span>
-            {homeEdge > 0.05 && <span className="text-emerald-400 text-xs ml-1">+{Math.round(homeEdge * 100)}%</span>}
-          </div>
-          <div className="col-span-3 text-center text-slate-400 text-sm font-mono">
-            {hasOdds ? `-1.5 (${formatOdds(odds.homeSpreadOdds)})` : '-1.5'}
-          </div>
-        </div>
-        
-        {/* Total Line */}
-        {hasOdds && (
-          <div className="mt-3 pt-3 border-t border-slate-800/50 flex justify-center gap-6 text-sm">
-            <span className="text-slate-500">
-              O/U <span className="text-white font-mono">{odds.totalLine}</span>
-            </span>
-            <span className="text-slate-400 font-mono">
-              O {formatOdds(odds.overOdds)} / U {formatOdds(odds.underOdds)}
-            </span>
-            <span className="text-slate-500">
-              Model: <span className="text-blue-400">{prediction.predictedTotal.toFixed(1)}</span>
-            </span>
-          </div>
-        )}
-      </div>
+      )}
       
       {/* Model Prediction Banner */}
       <div className="px-4 py-3 bg-gradient-to-r from-blue-600/20 to-purple-600/20 border-t border-slate-800">
         <div className="flex items-center justify-between text-sm">
           <div className="flex items-center gap-3">
-            <span className="text-slate-400">🤖 Pick:</span>
+            <span className="text-slate-400">🤖 Model Pick:</span>
             <span className="text-white font-semibold">
               {favoriteAbbrev}
               <span className={`ml-1 ${favoriteProb >= 0.58 ? 'text-emerald-400' : 'text-yellow-400'}`}>
                 ({Math.round(favoriteProb * 100)}%)
               </span>
             </span>
-            {hasValue && valueEdge >= 0.05 && (
+            {favoriteProb >= 0.58 && prediction.confidence >= 0.55 && (
               <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-xs font-medium">
-                ✓ VALUE +{Math.round(valueEdge * 100)}%
+                ✓ BET
               </span>
             )}
           </div>
-          <div className="flex items-center gap-4">
-            <span className={`text-xs px-2 py-0.5 rounded ${confDisplay.bg} ${confDisplay.color}`}>
-              {confDisplay.label}
-            </span>
-            {!hasOdds && (
-              <span className="text-slate-500 text-xs">No live odds</span>
-            )}
+          <div className="text-slate-500 text-xs">
+            Confidence: <span className="text-white">{Math.round(prediction.confidence * 100)}%</span>
           </div>
         </div>
       </div>
