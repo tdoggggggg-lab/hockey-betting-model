@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 
+type BetClassification = 'best_value' | 'value' | 'best' | 'none';
+
 interface PropPrediction {
   playerId: number;
   playerName: string;
@@ -16,22 +18,24 @@ interface PropPrediction {
   probability: number;
   line: number;
   confidence: number;
-  isValueBet: boolean;
-  edge?: number;  // Model prob - Book implied prob (e.g., 0.08 = 8% edge)
-  bookImpliedProb?: number;
-  bookOdds?: {
-    over: number;
-    under: number;
-    line: number;
-    bookmaker?: string;
-  };
-  injuryNote?: string;  // e.g., "Linemate injured (-25%)"
-  breakdown?: {
+  betClassification: BetClassification;
+  edge: number;
+  edgePercent: string;
+  bookOdds: number | null;
+  bookLine: string;
+  fairOdds: number;
+  expectedProfit: number;
+  breakdown: {
     basePrediction: number;
     homeAwayAdj: number;
     backToBackAdj: number;
     opponentAdj: number;
-    recentFormAdj: number;
+    goalieAdj: number;
+    linePromotionAdj: number;
+    linemateInjuryAdj: number;
+    vegasTotalAdj: number;
+    shotVolumeAdj: number;
+    ppBoost: number;
     finalPrediction: number;
   };
 }
@@ -47,9 +51,20 @@ interface GameInfo {
 interface PropsData {
   predictions: PropPrediction[];
   valueBets: PropPrediction[];
+  bestValueBets?: PropPrediction[];
+  valueBetsOnly?: PropPrediction[];
+  bestBetsOnly?: PropPrediction[];
   lastUpdated: string;
   gamesAnalyzed: number;
   playersAnalyzed: number;
+  playersWithBookOdds?: number;
+  bookOddsAvailable?: boolean;
+  betSummary?: {
+    bestValue: number;
+    value: number;
+    best: number;
+    total: number;
+  };
 }
 
 const teamColors: Record<string, string> = {
@@ -63,19 +78,44 @@ const teamColors: Record<string, string> = {
   'CBJ': '#002654', 'SJS': '#006D75', 'UTA': '#6CACE4', 'NYI': '#00539B',
 };
 
+function getBetBadge(classification: BetClassification): { text: string; className: string } {
+  switch (classification) {
+    case 'best_value':
+      return {
+        text: 'Best Value',
+        className: 'bg-gradient-to-r from-yellow-600/30 to-emerald-600/30 border border-yellow-500/50 text-yellow-300',
+      };
+    case 'value':
+      return {
+        text: 'Value',
+        className: 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-400',
+      };
+    case 'best':
+      return {
+        text: 'Best',
+        className: 'bg-blue-500/20 border border-blue-500/50 text-blue-400',
+      };
+    default:
+      return {
+        text: '-',
+        className: 'text-slate-600',
+      };
+  }
+}
+
 export default function GoalscorerTable() {
   const [propsData, setPropsData] = useState<PropsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedGame, setSelectedGame] = useState<string>('all');
-  const [sortBy, setSortBy] = useState<'probability' | 'confidence'>('probability');
-  const [showValueOnly, setShowValueOnly] = useState(false);
+  const [sortBy, setSortBy] = useState<'probability' | 'confidence' | 'edge'>('probability');
+  const [showBetsOnly, setShowBetsOnly] = useState(false);
 
   useEffect(() => {
     const fetchProps = async () => {
       try {
         setLoading(true);
-        const response = await fetch('/api/props?type=goalscorer');
+        const response = await fetch('/api/props?propType=goalscorer');
         if (!response.ok) throw new Error('Failed to fetch props');
         const data = await response.json();
         setPropsData(data);
@@ -90,11 +130,10 @@ export default function GoalscorerTable() {
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-uncheck "Top picks only" when selecting a specific game
   const handleGameChange = (value: string) => {
     setSelectedGame(value);
     if (value !== 'all') {
-      setShowValueOnly(false); // Show all players for specific game
+      setShowBetsOnly(false);
     }
   };
 
@@ -135,21 +174,15 @@ export default function GoalscorerTable() {
   });
   const games = Array.from(gamesMap.values());
 
-  const valueBetIds = new Set(propsData.valueBets.map(vb => vb.playerId));
-  const markedPredictions = propsData.predictions.map(pred => ({
-    ...pred,
-    isValueBet: valueBetIds.has(pred.playerId)
-  }));
-
   // Filter predictions
   let filteredPredictions: PropPrediction[];
   
   if (selectedGame === 'all') {
-    filteredPredictions = [...markedPredictions].sort((a, b) => b.probability - a.probability).slice(0, 10);
+    filteredPredictions = [...propsData.predictions].sort((a, b) => b.probability - a.probability).slice(0, 20);
   } else {
     const game = gamesMap.get(selectedGame);
     if (game) {
-      filteredPredictions = markedPredictions.filter(p => 
+      filteredPredictions = propsData.predictions.filter(p => 
         p.teamAbbrev === game.homeAbbrev || p.teamAbbrev === game.awayAbbrev
       );
     } else {
@@ -157,16 +190,18 @@ export default function GoalscorerTable() {
     }
   }
   
-  // Apply value bets filter (only for "all games" view)
-  if (showValueOnly && selectedGame === 'all') {
-    filteredPredictions = filteredPredictions.filter(p => p.isValueBet);
+  // Apply bets only filter
+  if (showBetsOnly && selectedGame === 'all') {
+    filteredPredictions = filteredPredictions.filter(p => p.betClassification !== 'none');
   }
   
   // Sort
   if (sortBy === 'probability') {
     filteredPredictions = [...filteredPredictions].sort((a, b) => b.probability - a.probability);
-  } else {
+  } else if (sortBy === 'confidence') {
     filteredPredictions = [...filteredPredictions].sort((a, b) => b.confidence - a.confidence);
+  } else if (sortBy === 'edge') {
+    filteredPredictions = [...filteredPredictions].sort((a, b) => b.edge - a.edge);
   }
 
   const formatProbability = (prob: number) => `${(prob * 100).toFixed(1)}%`;
@@ -177,87 +212,53 @@ export default function GoalscorerTable() {
     return `+${Math.round((100 * (1 - prob)) / prob)}`;
   };
   
+  const formatBookOdds = (odds: number | null) => {
+    if (odds === null || odds === 0) return '-';
+    return odds > 0 ? `+${odds}` : `${odds}`;
+  };
+  
   const formatConfidence = (conf: number) => {
     if (conf >= 0.75) return { dots: '●●●', color: 'text-emerald-400', label: 'High' };
-    if (conf >= 0.50) return { dots: '●●○', color: 'text-yellow-400', label: 'Medium' };
+    if (conf >= 0.50) return { dots: '●●○', color: 'text-blue-400', label: 'Med' };
     return { dots: '●○○', color: 'text-slate-500', label: 'Low' };
   };
 
-  return (
-    <div className="px-4">
-      {/* Stats Banner */}
-      <div className="mb-6 p-4 bg-gradient-to-r from-blue-900/30 to-purple-900/30 border border-blue-800/50 rounded-xl">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h2 className="text-xl font-bold text-white">Anytime Goalscorer Predictions</h2>
-            <p className="text-slate-400 text-sm">Model-generated probabilities using Poisson distribution</p>
-          </div>
-          <div className="flex items-center gap-6 text-sm">
-            <div className="text-center">
-              <div className="text-2xl font-bold text-blue-400">{propsData.gamesAnalyzed}</div>
-              <div className="text-slate-500">Games</div>
-            </div>
-            <div className="text-center">
-              <div className="text-2xl font-bold text-purple-400">{propsData.playersAnalyzed}</div>
-              <div className="text-slate-500">Players</div>
-            </div>
-            <div className="text-center">
-              <div className="text-2xl font-bold text-emerald-400">{propsData.valueBets?.length || 0}</div>
-              <div className="text-slate-500">Top Picks</div>
-            </div>
-          </div>
-        </div>
-      </div>
+  // Bet summary for header
+  const betSummary = propsData.betSummary || { bestValue: 0, value: 0, best: 0, total: 0 };
 
-      {/* Top Picks */}
-      {propsData.valueBets && propsData.valueBets.length > 0 && (
-        <div className="mb-6">
+  return (
+    <div className="bg-slate-900/50 rounded-xl p-6">
+      {/* Bet Summary Header */}
+      {betSummary.total > 0 && (
+        <div className="mb-6 p-4 bg-gradient-to-r from-emerald-900/30 to-blue-900/30 border border-emerald-800/50 rounded-lg">
           <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
-            🎯 Top Picks <span className="text-sm font-normal text-slate-400">Best combination of probability & confidence</span>
+            🎯 Today&apos;s Bets ({betSummary.total} found)
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {propsData.valueBets.slice(0, 6).map((pred, index) => (
-              <div key={pred.playerId} className="bg-gradient-to-r from-emerald-900/20 to-blue-900/20 border border-emerald-800/50 rounded-lg p-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" style={{ backgroundColor: teamColors[pred.teamAbbrev] || '#374151', color: 'white' }}>
-                      {pred.teamAbbrev}
-                    </div>
-                    <div>
-                      <div className="font-medium text-white">{pred.playerName}</div>
-                      <div className="text-xs text-slate-400">{pred.isHome ? 'vs' : '@'} {pred.opponentAbbrev} • {pred.gameTime}</div>
-                      {pred.injuryNote && (
-                        <div className="text-xs text-yellow-400">⚠️ {pred.injuryNote}</div>
-                      )}
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-emerald-400 font-bold text-sm">#{index + 1}</div>
-                    <div className="text-xs text-slate-500">rank</div>
-                  </div>
-                </div>
-                <div className="mt-2 flex justify-between text-sm">
-                  <div><div className="text-slate-500">Probability</div><div className="text-white font-semibold">{formatProbability(pred.probability)}</div></div>
-                  <div>
-                    <div className="text-slate-500">
-                      {pred.bookOdds?.over ? 'Book Odds' : 'Confidence'}
-                    </div>
-                    <div className="text-white font-semibold">
-                      {pred.bookOdds?.over 
-                        ? (pred.bookOdds.over > 0 ? `+${pred.bookOdds.over}` : pred.bookOdds.over)
-                        : `${Math.round(pred.confidence * 100)}%`}
-                    </div>
-                  </div>
-                </div>
-                {pred.edge && pred.edge > 0.03 && (
-                  <div className="mt-1 text-center">
-                    <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full">
-                      +{Math.round(pred.edge * 100)}% edge
-                    </span>
-                  </div>
-                )}
+          <div className="flex flex-wrap gap-4">
+            {betSummary.bestValue > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-1 bg-gradient-to-r from-yellow-600/30 to-emerald-600/30 border border-yellow-500/50 text-yellow-300 rounded text-xs font-medium">
+                  Best Value
+                </span>
+                <span className="text-white font-bold">{betSummary.bestValue}</span>
               </div>
-            ))}
+            )}
+            {betSummary.value > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-1 bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 rounded text-xs font-medium">
+                  Value
+                </span>
+                <span className="text-white font-bold">{betSummary.value}</span>
+              </div>
+            )}
+            {betSummary.best > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-1 bg-blue-500/20 border border-blue-500/50 text-blue-400 rounded text-xs font-medium">
+                  Best
+                </span>
+                <span className="text-white font-bold">{betSummary.best}</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -266,7 +267,7 @@ export default function GoalscorerTable() {
       <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
         <div className="flex flex-wrap items-center gap-3">
           <select value={selectedGame} onChange={(e) => handleGameChange(e.target.value)} className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm min-w-[200px]">
-            <option value="all">🏆 All Games (Top 10)</option>
+            <option value="all">🏆 All Games (Top 20)</option>
             {games.map(game => (
               <option key={game.id} value={game.id}>{game.label}</option>
             ))}
@@ -275,18 +276,22 @@ export default function GoalscorerTable() {
           <select value={sortBy} onChange={(e) => setSortBy(e.target.value as any)} className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm">
             <option value="probability">Sort by Probability</option>
             <option value="confidence">Sort by Confidence</option>
+            <option value="edge">Sort by Edge</option>
           </select>
           
           {selectedGame === 'all' && (
             <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer">
-              <input type="checkbox" checked={showValueOnly} onChange={(e) => setShowValueOnly(e.target.checked)} className="rounded border-slate-600 bg-slate-800 text-emerald-500" />
-              Top picks only
+              <input type="checkbox" checked={showBetsOnly} onChange={(e) => setShowBetsOnly(e.target.checked)} className="rounded border-slate-600 bg-slate-800 text-emerald-500" />
+              Bets only
             </label>
           )}
         </div>
         
         <div className="text-slate-500 text-sm">
-          {filteredPredictions.length} {selectedGame === 'all' ? 'top players' : 'players'}
+          {filteredPredictions.length} players
+          {propsData.playersWithBookOdds !== undefined && propsData.playersWithBookOdds > 0 && (
+            <span className="ml-2 text-emerald-400">• {propsData.playersWithBookOdds} with book odds</span>
+          )}
         </div>
       </div>
 
@@ -323,16 +328,18 @@ export default function GoalscorerTable() {
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Exp. Goals</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Probability</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm" title="Fair odds from model">Fair Odds</th>
-              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm" title="Sportsbook odds (coming Jan)">Book Odds</th>
+              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm" title="Line from sportsbook">Book Line</th>
+              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm" title="Odds from sportsbook">Book Odds</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Confidence</th>
-              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Status</th>
+              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Bets</th>
             </tr>
           </thead>
           <tbody>
             {filteredPredictions.map((pred, index) => {
               const confDisplay = formatConfidence(pred.confidence);
+              const betBadge = getBetBadge(pred.betClassification);
               return (
-                <tr key={`${pred.playerId}-${index}`} className={`border-b border-slate-800/50 hover:bg-slate-900/30 ${pred.isValueBet ? 'bg-emerald-900/10' : ''}`}>
+                <tr key={`${pred.playerId}-${index}`} className={`border-b border-slate-800/50 hover:bg-slate-900/30 ${pred.betClassification !== 'none' ? 'bg-emerald-900/10' : ''}`}>
                   <td className="py-3 px-4">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" style={{ backgroundColor: teamColors[pred.teamAbbrev] || '#374151', color: 'white' }}>
@@ -341,9 +348,6 @@ export default function GoalscorerTable() {
                       <div>
                         <div className="font-medium text-white">{pred.playerName}</div>
                         <div className="text-slate-500 text-xs">{pred.team}</div>
-                        {pred.injuryNote && (
-                          <div className="text-xs text-yellow-400">⚠️ {pred.injuryNote}</div>
-                        )}
                       </div>
                     </div>
                   </td>
@@ -366,18 +370,14 @@ export default function GoalscorerTable() {
                     </span>
                   </td>
                   <td className="py-3 px-2 text-center">
-                    {pred.bookOdds?.over ? (
-                      <div className="flex flex-col items-center">
-                        <span className="font-mono text-sm text-white">
-                          {pred.bookOdds.over > 0 ? `+${pred.bookOdds.over}` : pred.bookOdds.over}
-                        </span>
-                        {pred.edge && pred.edge > 0.03 && (
-                          <span className="text-xs text-emerald-400">+{Math.round(pred.edge * 100)}% edge</span>
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-slate-600 text-xs">-</span>
-                    )}
+                    <span className="text-slate-300 text-sm">
+                      {pred.bookLine || `${pred.line} Goals`}
+                    </span>
+                  </td>
+                  <td className="py-3 px-2 text-center">
+                    <span className={`font-mono text-sm ${pred.bookOdds ? 'text-white' : 'text-slate-600'}`}>
+                      {formatBookOdds(pred.bookOdds)}
+                    </span>
                   </td>
                   <td className="py-3 px-2 text-center">
                     <div className="flex flex-col items-center">
@@ -386,8 +386,15 @@ export default function GoalscorerTable() {
                     </div>
                   </td>
                   <td className="py-3 px-2 text-center">
-                    {pred.isValueBet ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded-full text-xs font-medium">🎯 Top Pick</span>
+                    {pred.betClassification !== 'none' ? (
+                      <div className="flex flex-col items-center gap-1">
+                        <span className={`inline-flex items-center px-2 py-1 rounded text-xs font-medium ${betBadge.className}`}>
+                          {betBadge.text}
+                        </span>
+                        {pred.edge > 0 && (
+                          <span className="text-xs text-emerald-400">{pred.edgePercent}</span>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-slate-600 text-xs">-</span>
                     )}
@@ -411,10 +418,12 @@ export default function GoalscorerTable() {
       <div className="mt-6 p-4 bg-slate-800/30 rounded-lg">
         <h4 className="text-sm font-medium text-slate-400 mb-2">About the Predictions</h4>
         <div className="text-xs text-slate-500 space-y-1">
-          <p><strong>Fair Odds:</strong> What the odds should be based on our model&apos;s probability (no vig)</p>
-          <p><strong>Book Odds:</strong> Live odds from DraftKings/FanDuel. Edge shows when model disagrees with Vegas.</p>
-          <p><strong>Probability:</strong> Model-predicted chance of scoring using Poisson distribution</p>
-          <p><strong>Confidence:</strong> How reliable the prediction is (player quality, form, matchup)</p>
+          <p><strong>Best Value:</strong> High probability (&gt;55%) AND edge (&gt;7%) - Rare, highest quality plays</p>
+          <p><strong>Value:</strong> Model edge over sportsbook (&gt;7%) - May not hit often but profitable long-term</p>
+          <p><strong>Best:</strong> High probability (&gt;55%) - Most likely to hit</p>
+          <p><strong>Book Line:</strong> The line from sportsbooks (e.g., &quot;0.5 Goals&quot; for anytime goalscorer)</p>
+          <p><strong>Book Odds:</strong> Live sportsbook odds from DraftKings, FanDuel, etc.</p>
+          <p><strong>Edge:</strong> Difference between model probability and book implied probability</p>
         </div>
         <div className="mt-2 text-xs text-slate-600">Last updated: {propsData.lastUpdated ? new Date(propsData.lastUpdated).toLocaleString() : 'N/A'}</div>
       </div>
