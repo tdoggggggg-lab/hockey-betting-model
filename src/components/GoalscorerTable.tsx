@@ -25,11 +25,7 @@ interface PropPrediction {
   bookLine?: string;
   fairOdds?: number;
   isValueBet?: boolean;
-  breakdown?: {
-    basePrediction: number;
-    homeAwayAdj: number;
-    finalPrediction: number;
-  };
+  breakdown?: any;
 }
 
 interface GameInfo {
@@ -78,26 +74,16 @@ export default function GoalscorerTable() {
         setLoading(true);
         setError(null);
         
-        // Add cache-busting for fresh data
         const response = await fetch(`/api/props?type=goalscorer&t=${Date.now()}`, {
           cache: 'no-store',
-          headers: {
-            'Cache-Control': 'no-cache',
-          }
         });
         
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         
         const data = await response.json();
-        
-        if (data.error) {
-          throw new Error(data.error);
-        }
+        if (data.error) throw new Error(data.error);
         
         setPropsData(data);
-        setError(null);
       } catch (err) {
         console.error('Fetch error:', err);
         setError(err instanceof Error ? err.message : 'Failed to load predictions');
@@ -107,17 +93,10 @@ export default function GoalscorerTable() {
     };
     
     fetchProps();
-    
-    // Refresh every 5 minutes
     const interval = setInterval(fetchProps, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, []);
 
-  const handleGameChange = (value: string) => {
-    setSelectedGame(value);
-  };
-
-  // Loading state
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -127,7 +106,6 @@ export default function GoalscorerTable() {
     );
   }
 
-  // Error state
   if (error || !propsData) {
     return (
       <div className="text-center py-12">
@@ -143,7 +121,7 @@ export default function GoalscorerTable() {
     );
   }
 
-  // Build games list from predictions
+  // Build games list
   const gamesMap = new Map<string, GameInfo>();
   propsData.predictions.forEach(pred => {
     const awayAbbrev = pred.isHome ? pred.opponentAbbrev : pred.teamAbbrev;
@@ -162,28 +140,18 @@ export default function GoalscorerTable() {
   });
   const games = Array.from(gamesMap.values());
 
-  // Mark value bets
-  const valueBetIds = new Set((propsData.valueBets || []).map(vb => vb.playerId));
-  const markedPredictions = propsData.predictions.map(pred => ({
-    ...pred,
-    isValueBet: valueBetIds.has(pred.playerId) || 
-                pred.betClassification === 'best_value' || 
-                pred.betClassification === 'value' || 
-                pred.betClassification === 'best'
-  }));
+  // Get sorted predictions
+  const sortedPredictions = [...propsData.predictions].sort((a, b) => b.probability - a.probability);
 
   // Filter predictions
   let filteredPredictions: PropPrediction[];
   
   if (selectedGame === 'all') {
-    // Show top 15 for "All Games"
-    filteredPredictions = [...markedPredictions]
-      .sort((a, b) => b.probability - a.probability)
-      .slice(0, 15);
+    filteredPredictions = sortedPredictions.slice(0, 15);
   } else {
     const game = gamesMap.get(selectedGame);
     if (game) {
-      filteredPredictions = markedPredictions.filter(p => 
+      filteredPredictions = sortedPredictions.filter(p => 
         p.teamAbbrev === game.homeAbbrev || p.teamAbbrev === game.awayAbbrev
       );
     } else {
@@ -191,17 +159,13 @@ export default function GoalscorerTable() {
     }
   }
   
-  // Sort
-  if (sortBy === 'probability') {
-    filteredPredictions = [...filteredPredictions].sort((a, b) => b.probability - a.probability);
-  } else {
+  // Apply sort
+  if (sortBy === 'confidence') {
     filteredPredictions = [...filteredPredictions].sort((a, b) => b.confidence - a.confidence);
   }
 
-  // Get top 6 picks for the cards
-  const topPicks = [...markedPredictions]
-    .sort((a, b) => b.probability - a.probability)
-    .slice(0, 6);
+  // Get top 6 picks for cards (ORIGINAL DESIGN - always show top 6 overall)
+  const topPicks = sortedPredictions.slice(0, 6);
 
   // Helper functions
   const formatProbability = (prob: number) => `${(prob * 100).toFixed(1)}%`;
@@ -218,71 +182,72 @@ export default function GoalscorerTable() {
     return { dots: '●○○', color: 'text-slate-500', label: 'Low' };
   };
 
+  // Check if a player is in top picks
+  const isTopPick = (playerId: number) => topPicks.some(p => p.playerId === playerId);
+
   return (
     <div className="px-4">
-      {/* Stats Banner - Original Design */}
-      <div className="mb-6 p-4 bg-gradient-to-r from-blue-900/30 to-purple-900/30 border border-blue-800/50 rounded-xl">
+      {/* ============ STATS BANNER - MATCHING IMAGE 2 ============ */}
+      <div className="mb-6 p-4 bg-slate-800/50 border border-slate-700/50 rounded-lg">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-xl font-bold text-white">Anytime Goalscorer</h2>
             <p className="text-slate-400 text-sm">Model predictions with Poisson distribution</p>
           </div>
-          <div className="flex items-center gap-6 text-sm">
+          <div className="flex items-center gap-8">
             <div className="text-center">
               <div className="text-2xl font-bold text-blue-400">{propsData.gamesAnalyzed}</div>
-              <div className="text-slate-500">Games</div>
+              <div className="text-slate-500 text-xs">Games</div>
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-purple-400">{propsData.playersAnalyzed}</div>
-              <div className="text-slate-500">Players</div>
+              <div className="text-slate-500 text-xs">Players</div>
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-emerald-400">{topPicks.length}</div>
-              <div className="text-slate-500">Top Picks</div>
+              <div className="text-slate-500 text-xs">Top Picks</div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Top 6 Picks Cards - Original Design */}
+      {/* ============ TOP 6 PICKS CARDS - MATCHING IMAGE 2 ============ */}
       {topPicks.length > 0 && (
         <div className="mb-6">
-          <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+          <h3 className="text-base font-semibold text-white mb-3 flex items-center gap-2">
             🎯 Top Picks
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {topPicks.map((pred, index) => (
               <div 
                 key={pred.playerId} 
-                className="bg-gradient-to-r from-slate-800/80 to-slate-900/80 border border-slate-700/50 rounded-lg p-3 hover:border-blue-500/50 transition-colors"
+                className="bg-slate-800/60 border border-slate-700/50 rounded-lg p-3 hover:border-slate-600 transition-colors"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <div 
-                      className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold" 
+                      className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold" 
                       style={{ backgroundColor: teamColors[pred.teamAbbrev] || '#374151', color: 'white' }}
                     >
                       {pred.teamAbbrev}
                     </div>
                     <div>
-                      <div className="font-medium text-white">{pred.playerName}</div>
+                      <div className="font-medium text-white text-sm">{pred.playerName}</div>
                       <div className="text-xs text-slate-400">
                         {pred.isHome ? 'vs' : '@'} {pred.opponentAbbrev}
                       </div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-emerald-400 font-bold text-lg">#{index + 1}</div>
-                  </div>
+                  <div className="text-emerald-400 font-bold">#{index + 1}</div>
                 </div>
-                <div className="mt-3 flex justify-between text-sm">
+                <div className="mt-2 flex justify-between text-xs">
                   <div>
-                    <div className="text-slate-500 text-xs">Prob</div>
-                    <div className="text-white font-semibold">{formatProbability(pred.probability)}</div>
+                    <span className="text-slate-500">Prob: </span>
+                    <span className="text-white font-semibold">{formatProbability(pred.probability)}</span>
                   </div>
-                  <div className="text-right">
-                    <div className="text-slate-500 text-xs">Fair</div>
-                    <div className="text-emerald-400 font-semibold">{formatFairOdds(pred.probability)}</div>
+                  <div>
+                    <span className="text-slate-500">Fair: </span>
+                    <span className="text-emerald-400 font-semibold">{formatFairOdds(pred.probability)}</span>
                   </div>
                 </div>
               </div>
@@ -291,13 +256,13 @@ export default function GoalscorerTable() {
         </div>
       )}
 
-      {/* Filters */}
+      {/* ============ FILTERS ============ */}
       <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
         <div className="flex flex-wrap items-center gap-3">
           <select 
             value={selectedGame} 
-            onChange={(e) => handleGameChange(e.target.value)} 
-            className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm min-w-[180px]"
+            onChange={(e) => setSelectedGame(e.target.value)} 
+            className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm min-w-[160px]"
           >
             <option value="all">All Games (Top 15)</option>
             {games.map(game => (
@@ -320,40 +285,12 @@ export default function GoalscorerTable() {
         </div>
       </div>
 
-      {/* Game Header when specific game selected */}
-      {selectedGame !== 'all' && gamesMap.get(selectedGame) && (
-        <div className="mb-4 p-3 bg-slate-800/50 rounded-lg">
-          <div className="flex items-center justify-center gap-4">
-            <div className="flex items-center gap-2">
-              <div 
-                className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" 
-                style={{ backgroundColor: teamColors[gamesMap.get(selectedGame)!.awayAbbrev] || '#374151', color: 'white' }}
-              >
-                {gamesMap.get(selectedGame)!.awayAbbrev}
-              </div>
-              <span className="text-white font-medium">{gamesMap.get(selectedGame)!.awayAbbrev}</span>
-            </div>
-            <span className="text-slate-500">@</span>
-            <div className="flex items-center gap-2">
-              <div 
-                className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" 
-                style={{ backgroundColor: teamColors[gamesMap.get(selectedGame)!.homeAbbrev] || '#374151', color: 'white' }}
-              >
-                {gamesMap.get(selectedGame)!.homeAbbrev}
-              </div>
-              <span className="text-white font-medium">{gamesMap.get(selectedGame)!.homeAbbrev}</span>
-            </div>
-            <span className="text-slate-400 ml-4">{gamesMap.get(selectedGame)!.gameTime}</span>
-          </div>
-        </div>
-      )}
-
-      {/* Table */}
+      {/* ============ TABLE ============ */}
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
-            <tr className="border-b border-slate-800">
-              <th className="text-left py-3 px-4 text-slate-400 font-medium text-sm">Player</th>
+            <tr className="border-b border-slate-700">
+              <th className="text-left py-3 px-3 text-slate-400 font-medium text-sm">Player</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Matchup</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Time</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Exp. Goals</th>
@@ -367,36 +304,36 @@ export default function GoalscorerTable() {
           <tbody>
             {filteredPredictions.map((pred, index) => {
               const confDisplay = formatConfidence(pred.confidence);
-              const isPick = pred.isValueBet || index < 6;
+              const isPick = isTopPick(pred.playerId);
               return (
                 <tr 
                   key={`${pred.playerId}-${index}`} 
-                  className={`border-b border-slate-800/50 hover:bg-slate-900/30 ${isPick ? 'bg-emerald-900/10' : ''}`}
+                  className={`border-b border-slate-800/50 hover:bg-slate-800/30 ${isPick ? 'bg-emerald-900/5' : ''}`}
                 >
-                  <td className="py-3 px-4">
-                    <div className="flex items-center gap-3">
+                  <td className="py-3 px-3">
+                    <div className="flex items-center gap-2">
                       <div 
-                        className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold" 
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold" 
                         style={{ backgroundColor: teamColors[pred.teamAbbrev] || '#374151', color: 'white' }}
                       >
                         {pred.teamAbbrev}
                       </div>
                       <div>
-                        <div className="font-medium text-white">{pred.playerName}</div>
+                        <div className="font-medium text-white text-sm">{pred.playerName}</div>
                         <div className="text-slate-500 text-xs">{pred.team}</div>
                       </div>
                     </div>
                   </td>
-                  <td className="py-3 px-2 text-center text-slate-300">
+                  <td className="py-3 px-2 text-center text-slate-300 text-sm">
                     {pred.isHome ? 'vs' : '@'} {pred.opponentAbbrev}
                   </td>
                   <td className="py-3 px-2 text-center text-slate-400 text-sm">{pred.gameTime}</td>
                   <td className="py-3 px-2 text-center">
-                    <span className="text-blue-400 font-mono">{pred.expectedValue.toFixed(2)}</span>
+                    <span className="text-blue-400 font-mono text-sm">{pred.expectedValue.toFixed(2)}</span>
                   </td>
                   <td className="py-3 px-2 text-center">
                     <div className="flex items-center justify-center gap-2">
-                      <div className="w-16 h-2 bg-slate-800 rounded-full overflow-hidden">
+                      <div className="w-14 h-1.5 bg-slate-700 rounded-full overflow-hidden">
                         <div 
                           className={`h-full rounded-full ${
                             pred.probability >= 0.4 ? 'bg-emerald-500' : 
@@ -405,7 +342,7 @@ export default function GoalscorerTable() {
                           style={{ width: `${Math.min(pred.probability * 100, 100)}%` }} 
                         />
                       </div>
-                      <span className={`font-semibold ${
+                      <span className={`font-semibold text-sm ${
                         pred.probability >= 0.4 ? 'text-emerald-400' : 
                         pred.probability >= 0.25 ? 'text-blue-400' : 'text-slate-400'
                       }`}>
@@ -425,12 +362,12 @@ export default function GoalscorerTable() {
                   <td className="py-3 px-2 text-center">
                     <div className="flex flex-col items-center">
                       <span className={`text-sm ${confDisplay.color}`}>{confDisplay.dots}</span>
-                      <span className="text-xs text-slate-500">{confDisplay.label}</span>
+                      <span className="text-[10px] text-slate-500">{confDisplay.label}</span>
                     </div>
                   </td>
                   <td className="py-3 px-2 text-center">
                     {isPick ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded-full text-xs font-medium">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-xs font-medium">
                         🎯 Pick
                       </span>
                     ) : (
@@ -451,19 +388,6 @@ export default function GoalscorerTable() {
           <p className="text-slate-500 text-sm mt-2">Check back closer to game time</p>
         </div>
       )}
-
-      {/* Info Footer */}
-      <div className="mt-6 p-4 bg-slate-800/30 rounded-lg">
-        <h4 className="text-sm font-medium text-slate-400 mb-2">About the Predictions</h4>
-        <div className="text-xs text-slate-500 space-y-1">
-          <p><strong>Fair Odds:</strong> What the odds should be based on our model&apos;s probability (no vig)</p>
-          <p><strong>Probability:</strong> Model-predicted chance of scoring using Poisson distribution</p>
-          <p><strong>Confidence:</strong> How reliable the prediction is (player quality, sample size)</p>
-        </div>
-        <div className="mt-2 text-xs text-slate-600">
-          Last updated: {propsData.lastUpdated ? new Date(propsData.lastUpdated).toLocaleString() : 'N/A'}
-        </div>
-      </div>
     </div>
   );
 }
