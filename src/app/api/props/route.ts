@@ -1,12 +1,13 @@
 // src/app/api/props/route.ts
-// Self-contained Player Props API - no external lib dependencies
+// Improved Player Props API with better caching and initial load handling
 
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 export const maxDuration = 60;
 
-// ============ INLINE TYPE DEFINITIONS ============
+// ============ TYPE DEFINITIONS ============
 
 type BetClassification = 'best_value' | 'value' | 'best' | 'none';
 
@@ -38,9 +39,8 @@ interface PropPrediction {
   };
 }
 
-// ============ INLINE HELPER FUNCTIONS ============
+// ============ HELPER FUNCTIONS ============
 
-// Bet classification
 function classifyBet(prob: number, edge: number, conf: number): BetClassification {
   const MIN_EDGE = 0.07;
   const MIN_PROB = 0.55;
@@ -65,13 +65,6 @@ function probToAmericanOdds(prob: number): number {
   return Math.round((100 * (1 - prob)) / prob);
 }
 
-function americanToProb(odds: number): number {
-  if (odds >= 100) return 100 / (odds + 100);
-  if (odds <= -100) return Math.abs(odds) / (Math.abs(odds) + 100);
-  return 0.5;
-}
-
-// Poisson probability
 function poissonProbability(lambda: number, k: number): number {
   return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
 }
@@ -87,119 +80,138 @@ function probAtLeastOne(lambda: number): number {
   return 1 - poissonProbability(lambda, 0);
 }
 
-// ============ CACHE ============
+// ============ GLOBAL CACHE ============
 
-let scheduleCache: any = null;
-let scheduleCacheTime = 0;
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+interface CacheData {
+  data: any;
+  timestamp: number;
+}
 
-async function getSchedule(): Promise<any[]> {
-  const now = Date.now();
-  if (scheduleCache && now - scheduleCacheTime < CACHE_TTL) {
-    return scheduleCache;
+const cache: Record<string, CacheData> = {};
+const CACHE_TTL = 3 * 60 * 1000; // 3 minutes
+
+function getCached(key: string): any | null {
+  const entry = cache[key];
+  if (entry && Date.now() - entry.timestamp < CACHE_TTL) {
+    return entry.data;
   }
+  return null;
+}
+
+function setCache(key: string, data: any): void {
+  cache[key] = { data, timestamp: Date.now() };
+}
+
+// ============ API FUNCTIONS WITH TIMEOUT ============
+
+async function fetchWithTimeout(url: string, timeout: number = 8000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
   
   try {
-    const res = await fetch('https://api-web.nhle.com/v1/schedule/now', {
-      signal: AbortSignal.timeout(10000)
+    const response = await fetch(url, { 
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' }
     });
-    if (!res.ok) return [];
-    const data = await res.json();
-    
-    // Get today's games
-    const gameWeek = data.gameWeek || [];
-    const today = new Date().toISOString().split('T')[0];
-    const todayGames = gameWeek.find((d: any) => d.date === today)?.games || [];
-    
-    // If no games today, get first day with games
-    if (todayGames.length === 0 && gameWeek.length > 0) {
-      for (const day of gameWeek) {
-        if (day.games?.length > 0) {
-          scheduleCache = day.games;
-          scheduleCacheTime = now;
-          return scheduleCache;
-        }
-      }
-    }
-    
-    scheduleCache = todayGames;
-    scheduleCacheTime = now;
-    return scheduleCache;
+    clearTimeout(timeoutId);
+    return response;
   } catch (error) {
-    console.error('Error fetching schedule:', error);
-    return scheduleCache || [];
+    clearTimeout(timeoutId);
+    throw error;
   }
 }
 
-async function getTeamRoster(teamAbbrev: string): Promise<any[]> {
+async function getSchedule(): Promise<any[]> {
+  const cacheKey = 'schedule';
+  const cached = getCached(cacheKey);
+  if (cached) {
+    console.log('Using cached schedule');
+    return cached;
+  }
+  
   try {
-    const res = await fetch(`https://api-web.nhle.com/v1/roster/${teamAbbrev}/current`, {
-      signal: AbortSignal.timeout(10000)
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
+    // Try primary endpoint
+    const response = await fetchWithTimeout('https://api-web.nhle.com/v1/schedule/now', 10000);
     
-    const players: any[] = [];
-    for (const pos of ['forwards', 'defensemen', 'goalies']) {
-      if (data[pos]) {
-        for (const player of data[pos]) {
-          players.push({
-            id: player.id,
-            name: `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim(),
-            position: player.positionCode || 'F',
-          });
-        }
+    if (!response.ok) {
+      throw new Error(`Schedule API returned ${response.status}`);
+    }
+    
+    const data = await response.json();
+    const gameWeek = data.gameWeek || [];
+    
+    // Find first day with games
+    for (const day of gameWeek) {
+      if (day.games && day.games.length > 0) {
+        console.log(`Found ${day.games.length} games for ${day.date}`);
+        setCache(cacheKey, day.games);
+        return day.games;
       }
     }
-    return players;
+    
+    return [];
   } catch (error) {
-    console.error(`Error fetching roster for ${teamAbbrev}:`, error);
+    console.error('Schedule fetch failed:', error);
+    
+    // Try fallback
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const fallback = await fetchWithTimeout(`https://api-web.nhle.com/v1/schedule/${today}`, 8000);
+      if (fallback.ok) {
+        const data = await fallback.json();
+        const games = data.gameWeek?.[0]?.games || [];
+        if (games.length > 0) {
+          setCache(cacheKey, games);
+          return games;
+        }
+      }
+    } catch {
+      console.log('Fallback also failed');
+    }
+    
     return [];
   }
 }
 
-async function getPlayerStats(playerId: number): Promise<any> {
+async function getRoster(teamAbbrev: string): Promise<any[]> {
+  const cacheKey = `roster_${teamAbbrev}`;
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+  
   try {
-    const res = await fetch(`https://api-web.nhle.com/v1/player/${playerId}/landing`, {
-      signal: AbortSignal.timeout(10000)
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
+    const response = await fetchWithTimeout(
+      `https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`,
+      8000
+    );
     
-    const stats = data.featuredStats?.regularSeason?.subSeason;
-    if (!stats) return null;
+    if (!response.ok) return [];
     
-    const gp = stats.gamesPlayed || 1;
-    return {
-      gamesPlayed: gp,
-      goals: stats.goals || 0,
-      assists: stats.assists || 0,
-      points: stats.points || 0,
-      shots: stats.shots || 0,
-      goalsPerGame: (stats.goals || 0) / gp,
-      assistsPerGame: (stats.assists || 0) / gp,
-      pointsPerGame: (stats.points || 0) / gp,
-      shotsPerGame: (stats.shots || 0) / gp,
-    };
-  } catch {
-    return null;
+    const data = await response.json();
+    const skaters = data.skaters || [];
+    setCache(cacheKey, skaters);
+    return skaters;
+  } catch (error) {
+    console.error(`Roster fetch failed for ${teamAbbrev}:`, error);
+    return [];
   }
 }
 
-// ============ MAIN HANDLER ============
+// ============ MAIN GET HANDLER ============
 
 export async function GET(request: Request) {
+  const startTime = Date.now();
+  
   try {
-    console.log('Props API: Starting...');
-    
     const { searchParams } = new URL(request.url);
-    const propType = searchParams.get('propType') || 'goalscorer';
+    const propType = searchParams.get('type') || searchParams.get('propType') || 'goalscorer';
     
-    // Get today's games
+    console.log(`\n🏒 Props API called for: ${propType}`);
+    
+    // Get schedule
     const games = await getSchedule();
-    console.log(`Props API: Found ${games.length} games`);
     
-    if (games.length === 0) {
+    if (!games || games.length === 0) {
+      console.log('No games found');
       return NextResponse.json({
         predictions: [],
         valueBets: [],
@@ -213,125 +225,155 @@ export async function GET(request: Request) {
     const predictions: PropPrediction[] = [];
     let playersAnalyzed = 0;
     
-    // Process each game
-    for (const game of games.slice(0, 8)) { // Limit to 8 games to avoid timeout
-      const homeAbbrev = game.homeTeam?.abbrev;
-      const awayAbbrev = game.awayTeam?.abbrev;
-      if (!homeAbbrev || !awayAbbrev) continue;
-      
-      const homeName = game.homeTeam?.placeName?.default && game.homeTeam?.commonName?.default
-        ? `${game.homeTeam.placeName.default} ${game.homeTeam.commonName.default}`
-        : homeAbbrev;
-      const awayName = game.awayTeam?.placeName?.default && game.awayTeam?.commonName?.default
-        ? `${game.awayTeam.placeName.default} ${game.awayTeam.commonName.default}`
-        : awayAbbrev;
-      
-      const gameTime = game.startTimeUTC 
-        ? new Date(game.startTimeUTC).toLocaleTimeString('en-US', { 
-            hour: 'numeric', 
-            minute: '2-digit', 
+    // Process games (limit to first 8 for speed)
+    const gamesToProcess = games.slice(0, 8);
+    
+    for (const game of gamesToProcess) {
+      try {
+        const homeAbbrev = game.homeTeam?.abbrev;
+        const awayAbbrev = game.awayTeam?.abbrev;
+        
+        if (!homeAbbrev || !awayAbbrev) continue;
+        
+        const homeName = game.homeTeam?.placeName?.default 
+          ? `${game.homeTeam.placeName.default} ${game.homeTeam.commonName?.default || ''}`
+          : homeAbbrev;
+        const awayName = game.awayTeam?.placeName?.default 
+          ? `${game.awayTeam.placeName.default} ${game.awayTeam.commonName?.default || ''}`
+          : awayAbbrev;
+        
+        let gameTime = 'TBD';
+        if (game.startTimeUTC) {
+          gameTime = new Date(game.startTimeUTC).toLocaleTimeString('en-US', {
+            hour: 'numeric',
+            minute: '2-digit',
             hour12: true,
             timeZone: 'America/New_York'
-          }) + ' ET'
-        : 'TBD';
-      
-      // Get rosters
-      const [homeRoster, awayRoster] = await Promise.all([
-        getTeamRoster(homeAbbrev),
-        getTeamRoster(awayAbbrev),
-      ]);
-      
-      // Process players from both teams
-      const processTeam = async (roster: any[], teamAbbrev: string, teamName: string, opponentAbbrev: string, opponentName: string, isHome: boolean) => {
-        // Only get forwards for goalscorer props
-        const eligiblePlayers = propType === 'goalscorer' 
-          ? roster.filter(p => p.position === 'C' || p.position === 'L' || p.position === 'R' || p.position === 'F').slice(0, 12)
-          : roster.slice(0, 15);
-        
-        for (const player of eligiblePlayers) {
-          playersAnalyzed++;
-          
-          const stats = await getPlayerStats(player.id);
-          if (!stats || stats.gamesPlayed < 5) continue;
-          
-          // Calculate expected value based on prop type
-          let expectedValue = 0;
-          let line = 0.5;
-          
-          switch (propType) {
-            case 'goalscorer':
-              expectedValue = stats.goalsPerGame * (isHome ? 1.05 : 0.95);
-              line = 0.5;
-              break;
-            case 'shots':
-              expectedValue = stats.shotsPerGame * (isHome ? 1.05 : 0.95);
-              line = 2.5;
-              break;
-            case 'assists':
-              expectedValue = stats.assistsPerGame * (isHome ? 1.05 : 0.95);
-              line = 0.5;
-              break;
-            case 'points':
-              expectedValue = stats.pointsPerGame * (isHome ? 1.05 : 0.95);
-              line = 0.5;
-              break;
-            default:
-              expectedValue = stats.goalsPerGame * (isHome ? 1.05 : 0.95);
-              line = 0.5;
-          }
-          
-          // Calculate probability using Poisson
-          const probability = propType === 'shots' 
-            ? 1 - poissonProbability(expectedValue, 0) - poissonProbability(expectedValue, 1) - poissonProbability(expectedValue, 2)
-            : probAtLeastOne(expectedValue);
-          
-          // Calculate confidence based on sample size
-          let confidence = 0.45;
-          if (stats.gamesPlayed >= 30) confidence += 0.25;
-          else if (stats.gamesPlayed >= 20) confidence += 0.15;
-          else if (stats.gamesPlayed >= 10) confidence += 0.05;
-          
-          if (expectedValue >= 0.4) confidence += 0.10; // High-volume players
-          confidence = Math.min(0.85, confidence);
-          
-          // Bet classification
-          const edge = 0; // No book odds, so no edge
-          const betClassification = classifyBet(probability, edge, confidence);
-          
-          predictions.push({
-            playerId: player.id,
-            playerName: player.name,
-            team: teamName,
-            teamAbbrev,
-            opponent: opponentName,
-            opponentAbbrev,
-            gameTime,
-            isHome,
-            propType,
-            expectedValue,
-            probability,
-            line,
-            confidence,
-            betClassification,
-            edge: 0,
-            edgePercent: '0%',
-            bookOdds: null,
-            bookLine: `${line} ${propType === 'shots' ? 'Shots' : propType === 'assists' ? 'Assists' : propType === 'points' ? 'Points' : 'Goals'}`,
-            fairOdds: probToAmericanOdds(probability),
-            expectedProfit: 0,
-            breakdown: {
-              basePrediction: propType === 'goalscorer' ? stats.goalsPerGame : 
-                             propType === 'shots' ? stats.shotsPerGame :
-                             propType === 'assists' ? stats.assistsPerGame : stats.pointsPerGame,
-              homeAwayAdj: isHome ? 1.05 : 0.95,
-              finalPrediction: expectedValue,
-            }
           });
         }
-      };
-      
-      await processTeam(homeRoster, homeAbbrev, homeName, awayAbbrev, awayName, true);
-      await processTeam(awayRoster, awayAbbrev, awayName, homeAbbrev, homeName, false);
+        
+        // Fetch rosters in parallel
+        const [homeRoster, awayRoster] = await Promise.all([
+          getRoster(homeAbbrev),
+          getRoster(awayAbbrev)
+        ]);
+        
+        // Process players
+        const processTeam = (roster: any[], teamAbbrev: string, teamName: string, 
+                           opponentAbbrev: string, opponentName: string, isHome: boolean) => {
+          // Limit players per team
+          const limitedRoster = roster.slice(0, 15);
+          
+          for (const player of limitedRoster) {
+            const name = player.firstName?.default && player.lastName?.default
+              ? `${player.firstName.default} ${player.lastName.default}`
+              : 'Unknown';
+            
+            const gamesPlayed = player.gamesPlayed || 0;
+            if (gamesPlayed < 10) continue;
+            
+            const goals = player.goals || 0;
+            const shots = player.shots || 0;
+            const assists = player.assists || 0;
+            const points = player.points || 0;
+            
+            const goalsPerGame = goals / gamesPlayed;
+            const shotsPerGame = shots / gamesPlayed;
+            const assistsPerGame = assists / gamesPlayed;
+            const pointsPerGame = points / gamesPlayed;
+            
+            // Filter by prop type
+            if (propType === 'goalscorer' && goalsPerGame < 0.05) continue;
+            if (propType === 'shots' && shotsPerGame < 1.5) continue;
+            if (propType === 'assists' && assistsPerGame < 0.1) continue;
+            if (propType === 'points' && pointsPerGame < 0.2) continue;
+            
+            // Calculate based on prop type
+            let baseLambda: number;
+            let line: number;
+            let lineLabel: string;
+            
+            switch (propType) {
+              case 'shots':
+                baseLambda = shotsPerGame;
+                line = 2.5;
+                lineLabel = 'Shots';
+                break;
+              case 'assists':
+                baseLambda = assistsPerGame;
+                line = 0.5;
+                lineLabel = 'Assists';
+                break;
+              case 'points':
+                baseLambda = pointsPerGame;
+                line = 0.5;
+                lineLabel = 'Points';
+                break;
+              default: // goalscorer
+                baseLambda = goalsPerGame;
+                line = 0.5;
+                lineLabel = 'Goals';
+            }
+            
+            // Apply adjustments
+            const homeAdj = isHome ? 1.05 : 0.95;
+            const expectedValue = baseLambda * homeAdj;
+            
+            // Calculate probability
+            const probability = propType === 'shots' 
+              ? Math.min(0.95, expectedValue / 5) // Simple approximation for shots
+              : probAtLeastOne(expectedValue);
+            
+            // Confidence based on sample size and production
+            let confidence = 0.5;
+            if (gamesPlayed >= 30) confidence += 0.15;
+            else if (gamesPlayed >= 20) confidence += 0.10;
+            if (goalsPerGame >= 0.4) confidence += 0.20;
+            else if (goalsPerGame >= 0.25) confidence += 0.10;
+            if (shotsPerGame >= 3.0) confidence += 0.10;
+            confidence = Math.min(0.95, confidence);
+            
+            // Classify bet
+            const betClassification = classifyBet(probability, 0, confidence);
+            
+            predictions.push({
+              playerId: player.playerId || Math.random(),
+              playerName: name,
+              team: teamName.trim(),
+              teamAbbrev,
+              opponent: opponentName.trim(),
+              opponentAbbrev,
+              gameTime,
+              isHome,
+              propType,
+              expectedValue,
+              probability,
+              line,
+              confidence,
+              betClassification,
+              edge: 0,
+              edgePercent: '0%',
+              bookOdds: null,
+              bookLine: `${line} ${lineLabel}`,
+              fairOdds: probToAmericanOdds(probability),
+              expectedProfit: 0,
+              breakdown: {
+                basePrediction: baseLambda,
+                homeAwayAdj: homeAdj,
+                finalPrediction: expectedValue,
+              }
+            });
+            
+            playersAnalyzed++;
+          }
+        };
+        
+        processTeam(homeRoster, homeAbbrev, homeName, awayAbbrev, awayName, true);
+        processTeam(awayRoster, awayAbbrev, awayName, homeAbbrev, homeName, false);
+        
+      } catch (gameError) {
+        console.error('Error processing game:', gameError);
+      }
     }
     
     // Sort by probability
@@ -342,16 +384,17 @@ export async function GET(request: Request) {
     const bestValueBets = predictions.filter(p => p.betClassification === 'best_value');
     const bestBets = predictions.filter(p => p.betClassification === 'best');
     
-    console.log(`Props API: Generated ${predictions.length} predictions, ${valueBets.length} bets`);
+    const elapsed = Date.now() - startTime;
+    console.log(`Props API: ${predictions.length} predictions, ${valueBets.length} bets in ${elapsed}ms`);
     
     return NextResponse.json({
-      predictions: predictions.slice(0, 50), // Top 50
-      valueBets,
+      predictions: predictions.slice(0, 50),
+      valueBets: valueBets.slice(0, 10),
       bestValueBets,
       valueBetsOnly: valueBets.filter(p => p.betClassification === 'value'),
       bestBetsOnly: bestBets,
       lastUpdated: new Date().toISOString(),
-      gamesAnalyzed: games.length,
+      gamesAnalyzed: gamesToProcess.length,
       playersAnalyzed,
       playersWithBookOdds: 0,
       bookOddsAvailable: false,
@@ -372,6 +415,6 @@ export async function GET(request: Request) {
       gamesAnalyzed: 0,
       playersAnalyzed: 0,
       error: 'Failed to generate predictions'
-    });
+    }, { status: 500 });
   }
 }
