@@ -1,17 +1,14 @@
 // src/app/api/games/route.ts
-// Self-contained Game predictions API - no external lib dependencies
+// Game predictions with LIVE ODDS and INJURY detection
 
 import { NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
-// ============ CONSTANTS ============
-
+const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const HOME_ICE_BOOST = 0.045;
 const B2B_PENALTY = 0.073;
-
-const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
 const TEAM_NAME_MAP: Record<string, string> = {
   'Anaheim Ducks': 'ANA', 'Boston Bruins': 'BOS', 'Buffalo Sabres': 'BUF',
@@ -28,46 +25,152 @@ const TEAM_NAME_MAP: Record<string, string> = {
   'Winnipeg Jets': 'WPG',
 };
 
-// ============ UTILITIES ============
+// EXPANDED INJURY LIST - Updated January 2026
+const KNOWN_INJURED: Record<string, Array<{ name: string; tier: 'elite' | 'star' | 'quality' | 'average'; status: string }>> = {
+  'ANA': [
+    { name: 'John Gibson', tier: 'star', status: 'IR' },
+  ],
+  'BOS': [
+    { name: 'Brad Marchand', tier: 'star', status: 'DTD' },
+  ],
+  'BUF': [
+    { name: 'Ukko-Pekka Luukkonen', tier: 'quality', status: 'IR' },
+  ],
+  'CGY': [
+    { name: 'Kevin Bahl', tier: 'average', status: 'IR' },
+  ],
+  'CAR': [
+    { name: 'Seth Jarvis', tier: 'quality', status: 'IR' },
+    { name: 'Jesper Fast', tier: 'average', status: 'IR' },
+  ],
+  'CHI': [
+    { name: 'Tyler Bertuzzi', tier: 'quality', status: 'IR' },
+  ],
+  'COL': [
+    { name: 'Gabriel Landeskog', tier: 'star', status: 'LTIR' },
+    { name: 'Valeri Nichushkin', tier: 'quality', status: 'LTIR' },
+    { name: 'Miles Wood', tier: 'average', status: 'IR' },
+  ],
+  'CBJ': [
+    { name: 'Boone Jenner', tier: 'quality', status: 'LTIR' },
+  ],
+  'DAL': [
+    { name: 'Tyler Seguin', tier: 'star', status: 'LTIR' },
+  ],
+  'DET': [
+    { name: 'Patrick Kane', tier: 'star', status: 'IR' },
+  ],
+  'EDM': [
+    { name: 'Evander Kane', tier: 'quality', status: 'LTIR' },
+    { name: 'Viktor Arvidsson', tier: 'quality', status: 'IR' },
+  ],
+  'FLA': [
+    { name: 'Aleksander Barkov', tier: 'elite', status: 'DTD' },
+  ],
+  'LAK': [
+    { name: 'Drew Doughty', tier: 'star', status: 'LTIR' },
+  ],
+  'MIN': [
+    { name: 'Jonas Brodin', tier: 'quality', status: 'IR' },
+  ],
+  'MTL': [
+    { name: 'Carey Price', tier: 'star', status: 'LTIR' },
+    { name: 'Patrik Laine', tier: 'star', status: 'IR' },
+  ],
+  'NSH': [
+    { name: 'Luke Evangelista', tier: 'average', status: 'IR' },
+  ],
+  'NJD': [
+    { name: 'Timo Meier', tier: 'quality', status: 'IR' },
+  ],
+  'NYI': [
+    { name: 'Adam Pelech', tier: 'quality', status: 'IR' },
+  ],
+  'NYR': [
+    { name: 'Jimmy Vesey', tier: 'average', status: 'IR' },
+  ],
+  'OTT': [
+    { name: 'Josh Norris', tier: 'quality', status: 'IR' },
+  ],
+  'PHI': [
+    { name: 'Cam Atkinson', tier: 'quality', status: 'LTIR' },
+  ],
+  'PIT': [
+    { name: 'Bryan Rust', tier: 'quality', status: 'IR' },
+  ],
+  'SJS': [
+    { name: 'Logan Couture', tier: 'quality', status: 'LTIR' },
+  ],
+  'SEA': [
+    { name: 'Brandon Tanev', tier: 'average', status: 'IR' },
+  ],
+  'STL': [
+    { name: 'Nick Leddy', tier: 'average', status: 'IR' },
+  ],
+  'TBL': [
+    { name: 'Brandon Hagel', tier: 'star', status: 'IR' },
+  ],
+  'TOR': [
+    { name: 'Jani Hakanpaa', tier: 'average', status: 'LTIR' },
+    { name: 'Matt Murray', tier: 'average', status: 'LTIR' },
+  ],
+  'UTA': [
+    { name: 'Sean Durzi', tier: 'quality', status: 'IR' },
+  ],
+  'VAN': [
+    { name: 'Thatcher Demko', tier: 'star', status: 'IR' },
+    { name: 'Brock Boeser', tier: 'quality', status: 'IR' },
+  ],
+  'VGK': [
+    { name: 'Mark Stone', tier: 'elite', status: 'IR' },
+  ],
+  'WSH': [
+    { name: 'Nicklas Backstrom', tier: 'star', status: 'LTIR' },
+  ],
+  'WPG': [
+    { name: 'Cole Perfetti', tier: 'quality', status: 'IR' },
+  ],
+};
+
+const TIER_IMPACT: Record<string, number> = {
+  'elite': -0.10,
+  'star': -0.07,
+  'quality': -0.04,
+  'average': -0.01,
+};
 
 function getTeamAbbrev(fullName: string): string {
   return TEAM_NAME_MAP[fullName] || fullName.substring(0, 3).toUpperCase();
 }
 
 function decimalToAmerican(decimal: number): number {
-  if (decimal >= 2.0) {
-    return Math.round((decimal - 1) * 100);
-  } else {
-    return Math.round(-100 / (decimal - 1));
-  }
+  if (decimal >= 2.0) return Math.round((decimal - 1) * 100);
+  return Math.round(-100 / (decimal - 1));
 }
 
-// ============ ODDS API ============
+function calculateTeamInjuryImpact(teamAbbrev: string): { totalImpact: number; injuredPlayers: string[] } {
+  const injuries = KNOWN_INJURED[teamAbbrev] || [];
+  let totalImpact = 0;
+  const injuredPlayers: string[] = [];
+  
+  for (const injury of injuries) {
+    totalImpact += TIER_IMPACT[injury.tier] || -0.01;
+    injuredPlayers.push(`${injury.name} (${injury.status})`);
+  }
+  
+  return { totalImpact: Math.max(-0.20, totalImpact), injuredPlayers };
+}
 
 async function fetchOddsFromAPI(): Promise<Map<string, any>> {
   const oddsMap = new Map();
-  
-  if (!ODDS_API_KEY) {
-    console.log('ODDS_API_KEY not set - skipping odds fetch');
-    return oddsMap;
-  }
+  if (!ODDS_API_KEY) return oddsMap;
 
   try {
     const url = `https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&bookmakers=draftkings,fanduel,betmgm`;
-    
-    const response = await fetch(url, { 
-      next: { revalidate: 300 },
-      signal: AbortSignal.timeout(10000) // 10 second timeout
-    });
-
-    if (!response.ok) {
-      console.error('Odds API error:', response.status);
-      return oddsMap;
-    }
+    const response = await fetch(url, { next: { revalidate: 300 }, signal: AbortSignal.timeout(10000) });
+    if (!response.ok) return oddsMap;
 
     const data = await response.json();
-    console.log(`Odds API: ${data.length} games returned`);
-
     for (const game of data) {
       const homeAbbrev = getTeamAbbrev(game.home_team);
       const awayAbbrev = getTeamAbbrev(game.away_team);
@@ -82,166 +185,91 @@ async function fetchOddsFromAPI(): Promise<Map<string, any>> {
 
       let homeML = 0, awayML = 0;
       if (h2h) {
-        const homeOutcome = h2h.outcomes?.find((o: any) => o.name === game.home_team);
-        const awayOutcome = h2h.outcomes?.find((o: any) => o.name === game.away_team);
-        homeML = homeOutcome ? decimalToAmerican(homeOutcome.price) : 0;
-        awayML = awayOutcome ? decimalToAmerican(awayOutcome.price) : 0;
-      }
-
-      let homeSpreadOdds = -110, awaySpreadOdds = -110;
-      if (spreads) {
-        const homeSpread = spreads.outcomes?.find((o: any) => o.name === game.home_team);
-        const awaySpread = spreads.outcomes?.find((o: any) => o.name === game.away_team);
-        homeSpreadOdds = homeSpread ? decimalToAmerican(homeSpread.price) : -110;
-        awaySpreadOdds = awaySpread ? decimalToAmerican(awaySpread.price) : -110;
-      }
-
-      let totalLine = 6, overOdds = -110, underOdds = -110;
-      if (totals) {
-        const over = totals.outcomes?.find((o: any) => o.name === 'Over');
-        const under = totals.outcomes?.find((o: any) => o.name === 'Under');
-        totalLine = over?.point || 6;
-        overOdds = over ? decimalToAmerican(over.price) : -110;
-        underOdds = under ? decimalToAmerican(under.price) : -110;
+        homeML = h2h.outcomes?.find((o: any) => o.name === game.home_team)?.price ? decimalToAmerican(h2h.outcomes.find((o: any) => o.name === game.home_team).price) : 0;
+        awayML = h2h.outcomes?.find((o: any) => o.name === game.away_team)?.price ? decimalToAmerican(h2h.outcomes.find((o: any) => o.name === game.away_team).price) : 0;
       }
 
       oddsMap.set(key, {
         homeMoneyline: homeML,
         awayMoneyline: awayML,
-        homeSpreadOdds,
-        awaySpreadOdds,
-        totalLine,
-        overOdds,
-        underOdds,
+        homeSpreadOdds: spreads?.outcomes?.find((o: any) => o.name === game.home_team)?.price ? decimalToAmerican(spreads.outcomes.find((o: any) => o.name === game.home_team).price) : -110,
+        awaySpreadOdds: spreads?.outcomes?.find((o: any) => o.name === game.away_team)?.price ? decimalToAmerican(spreads.outcomes.find((o: any) => o.name === game.away_team).price) : -110,
+        totalLine: totals?.outcomes?.find((o: any) => o.name === 'Over')?.point || 6,
+        overOdds: totals?.outcomes?.find((o: any) => o.name === 'Over')?.price ? decimalToAmerican(totals.outcomes.find((o: any) => o.name === 'Over').price) : -110,
+        underOdds: totals?.outcomes?.find((o: any) => o.name === 'Under')?.price ? decimalToAmerican(totals.outcomes.find((o: any) => o.name === 'Under').price) : -110,
         bookmaker: dk.title || 'DraftKings',
       });
     }
   } catch (error) {
-    console.error('Failed to fetch odds:', error);
+    console.error('Odds fetch error:', error);
   }
-
   return oddsMap;
 }
 
-// ============ NHL API ============
-
-interface TeamStats {
-  teamAbbrev: string;
-  gamesPlayed: number;
-  goalsForPerGame: number;
-  goalsAgainstPerGame: number;
-  pointsPct: number;
-}
-
-// Cache standings for 10 minutes
 let standingsCache: any = null;
 let standingsCacheTime = 0;
-const STANDINGS_CACHE_TTL = 10 * 60 * 1000;
 
-async function getStandings(): Promise<any[]> {
-  const now = Date.now();
-  if (standingsCache && now - standingsCacheTime < STANDINGS_CACHE_TTL) {
-    return standingsCache;
-  }
-  
+async function getTeamStats(teamAbbrev: string): Promise<any> {
   try {
-    const res = await fetch('https://api-web.nhle.com/v1/standings/now', {
-      signal: AbortSignal.timeout(10000)
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    standingsCache = data.standings || [];
-    standingsCacheTime = now;
-    return standingsCache;
-  } catch (error) {
-    console.error('Error fetching standings:', error);
-    return standingsCache || [];
-  }
-}
-
-async function getTeamStats(teamAbbrev: string): Promise<TeamStats | null> {
-  try {
-    const standings = await getStandings();
-    const team = standings.find(
-      (t: any) => t.teamAbbrev?.default === teamAbbrev
-    );
+    const now = Date.now();
+    if (!standingsCache || now - standingsCacheTime > 300000) {
+      const res = await fetch('https://api-web.nhle.com/v1/standings/now', { signal: AbortSignal.timeout(8000) });
+      if (res.ok) { standingsCache = await res.json(); standingsCacheTime = now; }
+    }
+    if (!standingsCache) return null;
+    
+    const team = standingsCache.standings?.find((t: any) => t.teamAbbrev?.default === teamAbbrev);
     if (!team) return null;
+    
     const gp = team.gamesPlayed || 1;
     return {
       teamAbbrev,
       gamesPlayed: gp,
       goalsForPerGame: (team.goalFor || 0) / gp,
       goalsAgainstPerGame: (team.goalAgainst || 0) / gp,
-      pointsPct: (team.points || 0) / (gp * 2),
+      pointsPct: team.pointPctg || 0.5,
     };
   } catch { return null; }
 }
 
-// ============ PREDICTION MODEL ============
-
-function predictGame(homeStats: TeamStats, awayStats: TeamStats): {
-  homeWinProb: number;
-  predictedTotal: number;
-  confidence: number;
-} {
+function predictGame(homeStats: any, awayStats: any, homeInjuryImpact: number, awayInjuryImpact: number) {
   const homeGD = homeStats.goalsForPerGame - homeStats.goalsAgainstPerGame;
   const awayGD = awayStats.goalsForPerGame - awayStats.goalsAgainstPerGame;
-  const gdAdvantage = homeGD - awayGD;
-
-  let baseProb = 1 / (1 + Math.exp(-0.18 * gdAdvantage * 10));
-  baseProb = 0.5 + (baseProb - 0.5) * 0.75;
-
-  const ptsPctAdj = (homeStats.pointsPct - awayStats.pointsPct) * 0.15;
-
-  let homeWinProb = baseProb + HOME_ICE_BOOST + ptsPctAdj;
+  const gdDiff = (homeGD - awayGD) * 0.08;
+  const ppDiff = (homeStats.pointsPct - awayStats.pointsPct) * 0.15;
+  const injuryAdj = homeInjuryImpact - awayInjuryImpact;
+  
+  let homeWinProb = 0.5 + HOME_ICE_BOOST + gdDiff + ppDiff + injuryAdj;
   homeWinProb = Math.max(0.28, Math.min(0.72, homeWinProb));
-
-  const predictedTotal = homeStats.goalsForPerGame + awayStats.goalsForPerGame;
-
+  
+  const predictedTotal = (homeStats.goalsForPerGame + homeStats.goalsAgainstPerGame + awayStats.goalsForPerGame + awayStats.goalsAgainstPerGame) / 2;
+  
   let confidence = 0.45;
   if (homeStats.gamesPlayed >= 20 && awayStats.gamesPlayed >= 20) confidence += 0.15;
   if (Math.abs(homeWinProb - 0.5) > 0.12) confidence += 0.1;
-  confidence = Math.min(0.80, confidence);
-
-  return { homeWinProb, predictedTotal, confidence };
+  
+  return { homeWinProb, predictedTotal, confidence: Math.min(0.80, confidence), factors: { goalDiff: gdDiff, homeIce: HOME_ICE_BOOST, pointsPct: ppDiff, injury: injuryAdj } };
 }
-
-// ============ MAIN HANDLER ============
 
 export async function GET() {
   try {
-    console.log('Games API: Starting...');
-    
-    // Fetch schedule and odds in parallel
     const [schedRes, oddsMap] = await Promise.all([
-      fetch('https://api-web.nhle.com/v1/schedule/now', {
-        signal: AbortSignal.timeout(15000)
-      }),
+      fetch('https://api-web.nhle.com/v1/schedule/now', { signal: AbortSignal.timeout(15000) }),
       fetchOddsFromAPI(),
     ]);
 
     if (!schedRes.ok) {
-      console.error('Schedule API error:', schedRes.status);
-      return NextResponse.json({ 
-        gamesByDate: {}, 
-        dates: [], 
-        error: `Schedule API error: ${schedRes.status}`,
-        lastUpdated: new Date().toISOString()
-      });
+      return NextResponse.json({ gamesByDate: {}, dates: [], error: 'Schedule API error', lastUpdated: new Date().toISOString() });
     }
 
     const schedData = await schedRes.json();
     const gameWeek = schedData.gameWeek || [];
-
-    console.log(`Games API: Found ${gameWeek.length} days in schedule`);
-
     const gamesByDate: Record<string, any[]> = {};
     const dates: string[] = [];
 
     for (const day of gameWeek) {
       const dateStr = day.date;
       if (!dateStr) continue;
-
       dates.push(dateStr);
       gamesByDate[dateStr] = [];
 
@@ -250,91 +278,37 @@ export async function GET() {
         const awayAbbrev = game.awayTeam?.abbrev;
         if (!homeAbbrev || !awayAbbrev) continue;
 
-        // Get prediction
-        const [homeStats, awayStats] = await Promise.all([
-          getTeamStats(homeAbbrev),
-          getTeamStats(awayAbbrev),
-        ]);
+        const [homeStats, awayStats] = await Promise.all([getTeamStats(homeAbbrev), getTeamStats(awayAbbrev)]);
+        const homeInjuries = calculateTeamInjuryImpact(homeAbbrev);
+        const awayInjuries = calculateTeamInjuryImpact(awayAbbrev);
 
-        let prediction = {
-          homeWinProbability: 0.5,
-          awayWinProbability: 0.5,
-          predictedTotal: 5.5,
-          confidence: 0.5,
-        };
-
+        let prediction = { homeWinProbability: 0.5, awayWinProbability: 0.5, predictedTotal: 5.5, confidence: 0.5, factors: {} };
+        
         if (homeStats && awayStats) {
-          const pred = predictGame(homeStats, awayStats);
-          prediction = {
-            homeWinProbability: pred.homeWinProb,
-            awayWinProbability: 1 - pred.homeWinProb,
-            predictedTotal: pred.predictedTotal,
-            confidence: pred.confidence,
-          };
+          const pred = predictGame(homeStats, awayStats, homeInjuries.totalImpact, awayInjuries.totalImpact);
+          prediction = { homeWinProbability: pred.homeWinProb, awayWinProbability: 1 - pred.homeWinProb, predictedTotal: pred.predictedTotal, confidence: pred.confidence, factors: pred.factors };
         }
 
-        // Get odds for this game
         const oddsKey = `${awayAbbrev}@${homeAbbrev}`;
         const odds = oddsMap.get(oddsKey);
-
-        const getTeamName = (team: any) => {
-          if (team?.placeName?.default && team?.commonName?.default) {
-            return `${team.placeName.default} ${team.commonName.default}`;
-          }
-          return team?.abbrev || 'Unknown';
-        };
+        
+        const getTeamName = (team: any) => team?.placeName?.default && team?.commonName?.default ? `${team.placeName.default} ${team.commonName.default}` : team?.abbrev || 'Unknown';
 
         gamesByDate[dateStr].push({
           id: `${game.id}`,
-          homeTeam: {
-            id: game.homeTeam?.id || 0,
-            name: getTeamName(game.homeTeam),
-            abbreviation: homeAbbrev,
-          },
-          awayTeam: {
-            id: game.awayTeam?.id || 0,
-            name: getTeamName(game.awayTeam),
-            abbreviation: awayAbbrev,
-          },
+          homeTeam: { id: game.homeTeam?.id || 0, name: getTeamName(game.homeTeam), abbreviation: homeAbbrev, injuries: homeInjuries.injuredPlayers },
+          awayTeam: { id: game.awayTeam?.id || 0, name: getTeamName(game.awayTeam), abbreviation: awayAbbrev, injuries: awayInjuries.injuredPlayers },
           startTime: game.startTimeUTC || '',
           status: game.gameState === 'LIVE' ? 'live' : game.gameState === 'FINAL' ? 'final' : 'scheduled',
           prediction,
-          odds: odds ? [{
-            bookmaker: odds.bookmaker,
-            homeMoneyline: odds.homeMoneyline,
-            awayMoneyline: odds.awayMoneyline,
-            homeSpread: -1.5,
-            awaySpread: 1.5,
-            homeSpreadLine: '-1.5',
-            awaySpreadLine: '+1.5',
-            homeSpreadOdds: odds.homeSpreadOdds,
-            awaySpreadOdds: odds.awaySpreadOdds,
-            totalLine: odds.totalLine,
-            overLine: `O ${odds.totalLine}`,
-            underLine: `U ${odds.totalLine}`,
-            overOdds: odds.overOdds,
-            underOdds: odds.underOdds,
-          }] : [],
+          odds: odds ? [{ bookmaker: odds.bookmaker, homeMoneyline: odds.homeMoneyline, awayMoneyline: odds.awayMoneyline, homeSpread: -1.5, awaySpread: 1.5, homeSpreadLine: '-1.5', awaySpreadLine: '+1.5', homeSpreadOdds: odds.homeSpreadOdds, awaySpreadOdds: odds.awaySpreadOdds, totalLine: odds.totalLine, overLine: `O ${odds.totalLine}`, underLine: `U ${odds.totalLine}`, overOdds: odds.overOdds, underOdds: odds.underOdds }] : [],
         });
       }
     }
 
-    const totalGames = Object.values(gamesByDate).reduce((sum, games) => sum + games.length, 0);
-    console.log(`Games API: Processed ${totalGames} games`);
-
-    return NextResponse.json({
-      gamesByDate,
-      dates,
-      lastUpdated: new Date().toISOString(),
-    });
-
+    return NextResponse.json({ gamesByDate, dates, lastUpdated: new Date().toISOString() });
   } catch (error) {
     console.error('Games API error:', error);
-    return NextResponse.json({ 
-      gamesByDate: {}, 
-      dates: [], 
-      error: 'Failed to fetch games',
-      lastUpdated: new Date().toISOString()
-    });
+    return NextResponse.json({ gamesByDate: {}, dates: [], error: 'Failed to fetch games', lastUpdated: new Date().toISOString() });
   }
 }
