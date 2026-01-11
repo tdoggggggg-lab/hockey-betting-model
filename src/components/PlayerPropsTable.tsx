@@ -69,6 +69,8 @@ interface PropsData {
 
 interface PlayerPropsTableProps {
   propType: 'goalscorer' | 'shots' | 'assists' | 'points' | 'saves';
+  title?: string;      // Optional - derived from propType if not provided
+  statLabel?: string;  // Optional - derived from propType if not provided
 }
 
 const teamColors: Record<string, string> = {
@@ -115,7 +117,7 @@ function getBetBadge(classification: BetClassification): { text: string; classNa
   }
 }
 
-export default function PlayerPropsTable({ propType }: PlayerPropsTableProps) {
+export default function PlayerPropsTable({ propType, title, statLabel }: PlayerPropsTableProps) {
   const [propsData, setPropsData] = useState<PropsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -123,7 +125,10 @@ export default function PlayerPropsTable({ propType }: PlayerPropsTableProps) {
   const [sortBy, setSortBy] = useState<'probability' | 'confidence' | 'edge'>('probability');
   const [showBetsOnly, setShowBetsOnly] = useState(false);
 
+  // Use provided title/statLabel or derive from propType config
   const config = propTypeConfig[propType] || propTypeConfig['goalscorer'];
+  const displayTitle = title || config.label;
+  const displayStatLabel = statLabel || config.valueLabel;
 
   useEffect(() => {
     const fetchProps = async () => {
@@ -155,7 +160,7 @@ export default function PlayerPropsTable({ propType }: PlayerPropsTableProps) {
     return (
       <div className="flex items-center justify-center py-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-        <span className="ml-3 text-slate-400">Loading {config.label.toLowerCase()} predictions...</span>
+        <span className="ml-3 text-slate-400">Loading {displayTitle.toLowerCase()} predictions...</span>
       </div>
     );
   }
@@ -255,7 +260,7 @@ export default function PlayerPropsTable({ propType }: PlayerPropsTableProps) {
       {betSummary.total > 0 && (
         <div className="mb-6 p-4 bg-gradient-to-r from-emerald-900/30 to-blue-900/30 border border-emerald-800/50 rounded-lg">
           <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
-            🎯 Today&apos;s {config.label} Bets ({betSummary.total} found)
+            🎯 Today&apos;s {displayTitle} Bets ({betSummary.total} found)
           </h3>
           <div className="flex flex-wrap gap-4">
             {betSummary.bestValue > 0 && (
@@ -348,7 +353,7 @@ export default function PlayerPropsTable({ propType }: PlayerPropsTableProps) {
               <th className="text-left py-3 px-4 text-slate-400 font-medium text-sm">Player</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Matchup</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Time</th>
-              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">{config.valueLabel}</th>
+              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">{displayStatLabel}</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Probability</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm" title="Fair odds from model">Fair Odds</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm" title="Line from sportsbook">Book Line</th>
@@ -432,14 +437,14 @@ export default function PlayerPropsTable({ propType }: PlayerPropsTableProps) {
       {filteredPredictions.length === 0 && (
         <div className="text-center py-12">
           <div className="text-4xl mb-4">🏒</div>
-          <h3 className="text-lg font-medium text-slate-400">No {config.label.toLowerCase()} predictions available</h3>
+          <h3 className="text-lg font-medium text-slate-400">No {displayTitle.toLowerCase()} predictions available</h3>
           <p className="text-slate-500 text-sm mt-2">Check back closer to game time</p>
         </div>
       )}
 
       {/* Info Footer */}
       <div className="mt-6 p-4 bg-slate-800/30 rounded-lg">
-        <h4 className="text-sm font-medium text-slate-400 mb-2">About {config.label} Predictions</h4>
+        <h4 className="text-sm font-medium text-slate-400 mb-2">About {displayTitle} Predictions</h4>
         <div className="text-xs text-slate-500 space-y-1">
           <p><strong>Best Value:</strong> High probability (&gt;55%) AND edge (&gt;7%) - Rare, highest quality plays</p>
           <p><strong>Value:</strong> Model edge over sportsbook (&gt;7%) - May not hit often but profitable long-term</p>
