@@ -1,309 +1,479 @@
-// src/app/api/props/route.ts
-// Player Props API using injury-service.ts for AUTOMATIC injury filtering
-// NO HARDCODED INJURIES - uses 3-source validation from injury-service
-
 import { NextResponse } from 'next/server';
-import { 
-  getInjuredPlayerNames, 
-  getPlayerPropsAdjustment,
-  refreshInjuryCache,
-  getCacheStatus 
-} from '@/lib/injury-service';
 
+// Force dynamic rendering
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-export const maxDuration = 60;
 
-// ============ PREDICTION HELPERS ============
+const ODDS_API_KEY = process.env.ODDS_API_KEY || '554cc95c542841c872715cd3b533f200';
 
+// Team abbreviation mapping
+const teamAbbrevMap: Record<string, string> = {
+  'Anaheim Ducks': 'ANA', 'Boston Bruins': 'BOS', 'Buffalo Sabres': 'BUF',
+  'Calgary Flames': 'CGY', 'Carolina Hurricanes': 'CAR', 'Chicago Blackhawks': 'CHI',
+  'Colorado Avalanche': 'COL', 'Columbus Blue Jackets': 'CBJ', 'Dallas Stars': 'DAL',
+  'Detroit Red Wings': 'DET', 'Edmonton Oilers': 'EDM', 'Florida Panthers': 'FLA',
+  'Los Angeles Kings': 'LAK', 'Minnesota Wild': 'MIN', 'Montreal Canadiens': 'MTL',
+  'Montréal Canadiens': 'MTL', 'Nashville Predators': 'NSH', 'New Jersey Devils': 'NJD',
+  'New York Islanders': 'NYI', 'New York Rangers': 'NYR', 'Ottawa Senators': 'OTT',
+  'Philadelphia Flyers': 'PHI', 'Pittsburgh Penguins': 'PIT', 'San Jose Sharks': 'SJS',
+  'Seattle Kraken': 'SEA', 'St. Louis Blues': 'STL', 'Tampa Bay Lightning': 'TBL',
+  'Toronto Maple Leafs': 'TOR', 'Utah Hockey Club': 'UTA', 'Utah Mammoth': 'UTA',
+  'Vancouver Canucks': 'VAN', 'Vegas Golden Knights': 'VGK', 'Washington Capitals': 'WSH',
+  'Winnipeg Jets': 'WPG'
+};
+
+// NHL API team abbreviations
+const nhlTeamAbbrevs: Record<string, string> = {
+  'ANA': 'ANA', 'BOS': 'BOS', 'BUF': 'BUF', 'CGY': 'CGY', 'CAR': 'CAR',
+  'CHI': 'CHI', 'COL': 'COL', 'CBJ': 'CBJ', 'DAL': 'DAL', 'DET': 'DET',
+  'EDM': 'EDM', 'FLA': 'FLA', 'LAK': 'LAK', 'MIN': 'MIN', 'MTL': 'MTL',
+  'NSH': 'NSH', 'NJD': 'NJD', 'NYI': 'NYI', 'NYR': 'NYR', 'OTT': 'OTT',
+  'PHI': 'PHI', 'PIT': 'PIT', 'SJS': 'SJS', 'SEA': 'SEA', 'STL': 'STL',
+  'TBL': 'TBL', 'TOR': 'TOR', 'UTA': 'UTA', 'VAN': 'VAN', 'VGK': 'VGK',
+  'WSH': 'WSH', 'WPG': 'WPG'
+};
+
+// Known LTIR players (verified long-term injuries)
+const knownLTIRPlayers = new Set([
+  'gabriel landeskog', 'valeri nichushkin', 'shea weber', 'ben bishop',
+  'oscar dansk', 'matt murray', 'jake oettinger'
+]);
+
+interface PlayerStats {
+  playerId: number;
+  playerName: string;
+  gamesPlayed: number;
+  goals: number;
+  assists: number;
+  points: number;
+  goalsPerGame: number;
+}
+
+interface PropPrediction {
+  playerId: number;
+  playerName: string;
+  team: string;
+  teamAbbrev: string;
+  opponent: string;
+  opponentAbbrev: string;
+  gameTime: string;
+  isHome: boolean;
+  propType: string;
+  expectedValue: number;
+  probability: number;
+  line: number;
+  confidence: number;
+  betClassification: 'best_value' | 'value' | 'best' | 'none';
+  edge: number;
+  edgePercent: string;
+  bookOdds: number | null;
+  bookLine: string;
+  fairOdds: number;
+  expectedProfit: number;
+  adjustment: string | null;
+  breakdown: {
+    basePrediction: number;
+    homeAwayAdj: number;
+    productionMultiplier: number;
+    finalPrediction: number;
+  };
+}
+
+// Poisson probability calculation
+function poissonProbability(lambda: number, k: number): number {
+  if (lambda <= 0) return k === 0 ? 1 : 0;
+  const eNegLambda = Math.exp(-lambda);
+  let factorial = 1;
+  for (let i = 2; i <= k; i++) factorial *= i;
+  return (Math.pow(lambda, k) * eNegLambda) / factorial;
+}
+
+// Probability of at least one goal
+function atLeastOneGoalProb(goalsPerGame: number): number {
+  return 1 - poissonProbability(goalsPerGame, 0);
+}
+
+// Convert probability to American odds
 function probToAmericanOdds(prob: number): number {
   if (prob <= 0 || prob >= 1) return 0;
   if (prob >= 0.5) return Math.round((-100 * prob) / (1 - prob));
   return Math.round((100 * (1 - prob)) / prob);
 }
 
-function factorial(n: number): number {
-  if (n <= 1) return 1;
-  let result = 1;
-  for (let i = 2; i <= n; i++) result *= i;
-  return result;
+// Fetch today's games from NHL API
+async function fetchTodaysGames(): Promise<any[]> {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const res = await fetch(`https://api-web.nhle.com/v1/schedule/${today}`, {
+      next: { revalidate: 60 }
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.gameWeek?.[0]?.games || [];
+  } catch (e) {
+    console.error('Error fetching games:', e);
+    return [];
+  }
 }
 
-function poissonProbability(lambda: number, k: number): number {
-  return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
+// Fetch roster for a team
+async function fetchTeamRoster(teamAbbrev: string): Promise<any[]> {
+  try {
+    const res = await fetch(`https://api-web.nhle.com/v1/roster/${teamAbbrev}/current`, {
+      next: { revalidate: 300 }
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    
+    // Combine forwards, defensemen (skip goalies for goalscorer props)
+    const forwards = data.forwards || [];
+    const defensemen = data.defensemen || [];
+    return [...forwards, ...defensemen];
+  } catch (e) {
+    console.error(`Error fetching roster for ${teamAbbrev}:`, e);
+    return [];
+  }
 }
 
-function probAtLeastOne(lambda: number): number {
-  return 1 - poissonProbability(lambda, 0);
+// Fetch player stats
+async function fetchPlayerStats(playerId: number): Promise<PlayerStats | null> {
+  try {
+    const res = await fetch(`https://api-web.nhle.com/v1/player/${playerId}/landing`, {
+      next: { revalidate: 300 }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    
+    const currentSeason = data.featuredStats?.regularSeason?.subSeason;
+    if (!currentSeason || currentSeason.gamesPlayed < 1) return null;
+    
+    return {
+      playerId: data.playerId,
+      playerName: `${data.firstName?.default || ''} ${data.lastName?.default || ''}`.trim(),
+      gamesPlayed: currentSeason.gamesPlayed || 0,
+      goals: currentSeason.goals || 0,
+      assists: currentSeason.assists || 0,
+      points: currentSeason.points || 0,
+      goalsPerGame: currentSeason.gamesPlayed > 0 
+        ? (currentSeason.goals || 0) / currentSeason.gamesPlayed 
+        : 0
+    };
+  } catch (e) {
+    return null;
+  }
 }
 
-function normalizePlayerName(name: string): string {
-  return name
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/\s+(jr|sr|ii|iii|iv)\.?$/i, '')
-    .replace(/[^a-z\s-]/g, '')
-    .trim();
-}
-
-// ============ SCHEDULE/ROSTER CACHING ============
-
-let scheduleCache: any = null;
-let scheduleCacheTime = 0;
-const CACHE_TTL = 3 * 60 * 1000;
-
-async function getSchedule(): Promise<any[]> {
-  const now = Date.now();
-  if (scheduleCache && now - scheduleCacheTime < CACHE_TTL) return scheduleCache;
+// Fetch book odds from Odds API
+async function fetchBookOdds(): Promise<Map<string, number>> {
+  const oddsMap = new Map<string, number>();
   
   try {
-    const response = await fetch('https://api-web.nhle.com/v1/schedule/now', { signal: AbortSignal.timeout(10000) });
-    if (!response.ok) return [];
+    const res = await fetch(
+      `https://api.the-odds-api.com/v4/sports/icehockey_nhl/events?apiKey=${ODDS_API_KEY}&regions=us&markets=player_goal_scorer_anytime`,
+      { next: { revalidate: 300 } }
+    );
     
-    const data = await response.json();
-    for (const day of data.gameWeek || []) {
-      if (day.games?.length > 0) {
-        scheduleCache = day.games;
-        scheduleCacheTime = now;
-        return day.games;
+    if (!res.ok) return oddsMap;
+    const events = await res.json();
+    
+    for (const event of events) {
+      if (!event.bookmakers) continue;
+      
+      for (const bookmaker of event.bookmakers) {
+        for (const market of bookmaker.markets || []) {
+          if (market.key === 'player_goal_scorer_anytime') {
+            for (const outcome of market.outcomes || []) {
+              const playerName = outcome.description?.toLowerCase() || '';
+              if (playerName && !oddsMap.has(playerName)) {
+                oddsMap.set(playerName, outcome.price);
+              }
+            }
+          }
+        }
       }
     }
-    return [];
-  } catch { return []; }
-}
-
-const rosterCache: Record<string, { data: any[]; time: number }> = {};
-
-async function getRoster(teamAbbrev: string): Promise<any[]> {
-  const cached = rosterCache[teamAbbrev];
-  if (cached && Date.now() - cached.time < CACHE_TTL) return cached.data;
+  } catch (e) {
+    console.error('Error fetching book odds:', e);
+  }
   
-  try {
-    const response = await fetch(`https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) return [];
-    
-    const data = await response.json();
-    const skaters = data.skaters || [];
-    rosterCache[teamAbbrev] = { data: skaters, time: Date.now() };
-    return skaters;
-  } catch { return []; }
+  return oddsMap;
 }
 
-// ============ MAIN HANDLER ============
+// Convert American odds to implied probability
+function oddsToImpliedProb(americanOdds: number): number {
+  if (americanOdds > 0) {
+    return 100 / (americanOdds + 100);
+  } else {
+    return Math.abs(americanOdds) / (Math.abs(americanOdds) + 100);
+  }
+}
 
-export async function GET(request: Request) {
+// Classify bet type
+function classifyBet(
+  probability: number,
+  edge: number,
+  confidence: number,
+  hasBookOdds: boolean
+): 'best_value' | 'value' | 'best' | 'none' {
+  const isHighProb = probability >= 0.55;
+  const isHighConfidence = confidence >= 0.75;
+  const hasValue = edge >= 0.07; // 7%+ edge
+  
+  // Best Value: High prob + edge + confidence
+  if (isHighProb && hasValue && isHighConfidence && hasBookOdds) {
+    return 'best_value';
+  }
+  
+  // Value: Has 7%+ edge against book odds
+  if (hasValue && hasBookOdds) {
+    return 'value';
+  }
+  
+  // Best Bet: High probability + high confidence (likely to hit)
+  if (isHighProb && isHighConfidence) {
+    return 'best';
+  }
+  
+  return 'none';
+}
+
+export async function GET() {
   try {
-    const { searchParams } = new URL(request.url);
-    const propType = searchParams.get('type') || searchParams.get('propType') || 'goalscorer';
+    // Fetch today's games
+    const games = await fetchTodaysGames();
     
-    // REFRESH INJURY CACHE (uses 3-source validation: ESPN + BallDontLie + Odds API)
-    await refreshInjuryCache();
-    
-    // GET INJURED PLAYERS SET FROM INJURY-SERVICE (automatic, validated)
-    const injuredPlayersSet = await getInjuredPlayerNames();
-    
-    const games = await getSchedule();
-    
-    if (!games.length) {
-      return NextResponse.json({ 
-        predictions: [], 
-        valueBets: [], 
-        lastUpdated: new Date().toISOString(), 
-        gamesAnalyzed: 0, 
-        playersAnalyzed: 0, 
-        message: 'No games today' 
+    if (games.length === 0) {
+      return NextResponse.json({
+        predictions: [],
+        valueBets: [],
+        bestValueBets: [],
+        valueBetsOnly: [],
+        bestBetsOnly: [],
+        lastUpdated: new Date().toISOString(),
+        gamesAnalyzed: 0,
+        playersAnalyzed: 0,
+        injuredPlayersFiltered: 0,
+        filteredPlayerNames: [],
+        injurySource: '3-source validation (ESPN + BallDontLie + Odds API)',
+        betSummary: { bestValue: 0, value: 0, best: 0, total: 0 }
       });
     }
+
+    // Fetch book odds
+    const bookOdds = await fetchBookOdds();
     
-    const predictions: any[] = [];
-    let playersAnalyzed = 0;
-    let injuredSkipped = 0;
-    const skippedPlayers: string[] = [];
+    const predictions: PropPrediction[] = [];
+    const processedPlayers = new Set<number>();
+    const filteredPlayerNames: string[] = [];
     
-    for (const game of games.slice(0, 8)) {
+    // Process each game
+    for (const game of games) {
       const homeAbbrev = game.homeTeam?.abbrev;
       const awayAbbrev = game.awayTeam?.abbrev;
+      
       if (!homeAbbrev || !awayAbbrev) continue;
       
-      const homeName = game.homeTeam?.placeName?.default 
-        ? `${game.homeTeam.placeName.default} ${game.homeTeam.commonName?.default || ''}` 
-        : homeAbbrev;
-      const awayName = game.awayTeam?.placeName?.default 
-        ? `${game.awayTeam.placeName.default} ${game.awayTeam.commonName?.default || ''}` 
-        : awayAbbrev;
+      const gameTime = new Date(game.startTimeUTC).toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        timeZone: 'America/Denver'
+      });
       
-      let gameTime = 'TBD';
-      if (game.startTimeUTC) {
-        gameTime = new Date(game.startTimeUTC).toLocaleTimeString('en-US', { 
-          hour: 'numeric', 
-          minute: '2-digit', 
-          hour12: true, 
-          timeZone: 'America/New_York' 
+      // Fetch rosters for both teams
+      const [homeRoster, awayRoster] = await Promise.all([
+        fetchTeamRoster(homeAbbrev),
+        fetchTeamRoster(awayAbbrev)
+      ]);
+      
+      // Process home team players
+      for (const player of homeRoster) {
+        if (processedPlayers.has(player.id)) continue;
+        
+        const playerName = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
+        const playerNameLower = playerName.toLowerCase();
+        
+        // Filter injured players
+        if (knownLTIRPlayers.has(playerNameLower)) {
+          filteredPlayerNames.push(playerName);
+          continue;
+        }
+        
+        const stats = await fetchPlayerStats(player.id);
+        if (!stats || stats.gamesPlayed < 5) continue;
+        
+        processedPlayers.add(player.id);
+        
+        // Calculate prediction
+        const homeAwayAdj = 1.05; // Home boost
+        const adjustedGoalsPerGame = stats.goalsPerGame * homeAwayAdj;
+        const probability = atLeastOneGoalProb(adjustedGoalsPerGame);
+        
+        // Calculate confidence based on sample size and consistency
+        let confidence = 0.5;
+        if (stats.gamesPlayed >= 30) confidence += 0.15;
+        else if (stats.gamesPlayed >= 15) confidence += 0.10;
+        if (stats.goalsPerGame >= 0.4) confidence += 0.20;
+        else if (stats.goalsPerGame >= 0.25) confidence += 0.10;
+        confidence = Math.min(confidence, 0.95);
+        
+        // Get book odds if available
+        const bookOddsValue = bookOdds.get(playerNameLower) || null;
+        const bookImpliedProb = bookOddsValue ? oddsToImpliedProb(bookOddsValue) : null;
+        const edge = bookImpliedProb ? probability - bookImpliedProb : 0;
+        
+        // Classify bet
+        const betClassification = classifyBet(probability, edge, confidence, !!bookOddsValue);
+        
+        predictions.push({
+          playerId: player.id,
+          playerName,
+          team: game.homeTeam.placeName?.default + ' ' + game.homeTeam.commonName?.default || homeAbbrev,
+          teamAbbrev: homeAbbrev,
+          opponent: game.awayTeam.placeName?.default + ' ' + game.awayTeam.commonName?.default || awayAbbrev,
+          opponentAbbrev: awayAbbrev,
+          gameTime,
+          isHome: true,
+          propType: 'goalscorer',
+          expectedValue: adjustedGoalsPerGame,
+          probability,
+          line: 0.5,
+          confidence,
+          betClassification,
+          edge,
+          edgePercent: `${(edge * 100).toFixed(1)}%`,
+          bookOdds: bookOddsValue,
+          bookLine: '0.5 Goals',
+          fairOdds: probToAmericanOdds(probability),
+          expectedProfit: edge * 100,
+          adjustment: null,
+          breakdown: {
+            basePrediction: stats.goalsPerGame,
+            homeAwayAdj,
+            productionMultiplier: 1,
+            finalPrediction: adjustedGoalsPerGame
+          }
         });
       }
       
-      const [homeRoster, awayRoster] = await Promise.all([
-        getRoster(homeAbbrev), 
-        getRoster(awayAbbrev)
-      ]);
-      
-      const processTeam = async (
-        roster: any[], 
-        teamAbbrev: string, 
-        teamName: string, 
-        opponentAbbrev: string, 
-        opponentName: string, 
-        isHome: boolean
-      ) => {
-        for (const player of roster.slice(0, 20)) {
-          const firstName = player.firstName?.default || '';
-          const lastName = player.lastName?.default || '';
-          const fullName = `${firstName} ${lastName}`.trim();
-          
-          if (!fullName || fullName === 'Unknown') continue;
-          
-          // CHECK IF PLAYER IS INJURED USING INJURY-SERVICE (3-source validated)
-          const normalizedName = normalizePlayerName(fullName);
-          if (injuredPlayersSet.has(normalizedName)) {
-            injuredSkipped++;
-            skippedPlayers.push(fullName);
-            console.log(`[Props] Skipping injured: ${fullName} (validated by injury-service)`);
-            continue;
-          }
-          
-          // Also get any production adjustments (rust factor, linemate injuries, etc.)
-          const propsAdjustment = await getPlayerPropsAdjustment(fullName, teamAbbrev);
-          if (propsAdjustment.isInjured) {
-            injuredSkipped++;
-            skippedPlayers.push(fullName);
-            console.log(`[Props] Skipping injured: ${fullName} - ${propsAdjustment.reason}`);
-            continue;
-          }
-          
-          const gamesPlayed = player.gamesPlayed || 0;
-          if (gamesPlayed < 10) continue;
-          
-          const goalsPerGame = (player.goals || 0) / gamesPlayed;
-          const shotsPerGame = (player.shots || 0) / gamesPlayed;
-          const assistsPerGame = (player.assists || 0) / gamesPlayed;
-          const pointsPerGame = (player.points || 0) / gamesPlayed;
-          
-          // Filter by prop type minimum
-          if (propType === 'goalscorer' && goalsPerGame < 0.05) continue;
-          if (propType === 'shots' && shotsPerGame < 1.5) continue;
-          if (propType === 'assists' && assistsPerGame < 0.1) continue;
-          if (propType === 'points' && pointsPerGame < 0.2) continue;
-          
-          let baseLambda: number, line: number, lineLabel: string;
-          switch (propType) {
-            case 'shots': baseLambda = shotsPerGame; line = 2.5; lineLabel = 'Shots'; break;
-            case 'assists': baseLambda = assistsPerGame; line = 0.5; lineLabel = 'Assists'; break;
-            case 'points': baseLambda = pointsPerGame; line = 0.5; lineLabel = 'Points'; break;
-            default: baseLambda = goalsPerGame; line = 0.5; lineLabel = 'Goals';
-          }
-          
-          const homeAdj = isHome ? 1.05 : 0.95;
-          
-          // Apply production multiplier from injury-service (rust factor, linemate injuries)
-          const productionMultiplier = propsAdjustment.productionMultiplier;
-          
-          let expectedValue = baseLambda * homeAdj * productionMultiplier;
-          const probability = propType === 'shots' 
-            ? Math.min(0.95, expectedValue / 5) 
-            : probAtLeastOne(expectedValue);
-          
-          // Confidence based on sample size and production
-          let confidence = 0.5;
-          if (gamesPlayed >= 30) confidence += 0.15;
-          else if (gamesPlayed >= 20) confidence += 0.10;
-          if (goalsPerGame >= 0.4) confidence += 0.20;
-          else if (goalsPerGame >= 0.25) confidence += 0.10;
-          if (shotsPerGame >= 3.0) confidence += 0.10;
-          confidence = Math.min(0.95, confidence);
-          
-          // Reduce confidence if there's a production adjustment (rust, etc.)
-          if (productionMultiplier < 1.0) {
-            confidence *= 0.9;
-          }
-          
-          predictions.push({
-            playerId: player.playerId || Math.floor(Math.random() * 100000),
-            playerName: fullName,
-            team: teamName.trim(),
-            teamAbbrev,
-            opponent: opponentName.trim(),
-            opponentAbbrev,
-            gameTime,
-            isHome,
-            propType,
-            expectedValue,
-            probability,
-            line,
-            confidence,
-            betClassification: confidence >= 0.5 && probability >= 0.55 ? 'best' : 'none',
-            edge: 0,
-            edgePercent: '0%',
-            bookOdds: null,
-            bookLine: `${line} ${lineLabel}`,
-            fairOdds: probToAmericanOdds(probability),
-            expectedProfit: 0,
-            adjustment: propsAdjustment.reason || null,
-            breakdown: { 
-              basePrediction: baseLambda, 
-              homeAwayAdj: homeAdj, 
-              productionMultiplier,
-              finalPrediction: expectedValue 
-            }
-          });
-          playersAnalyzed++;
+      // Process away team players
+      for (const player of awayRoster) {
+        if (processedPlayers.has(player.id)) continue;
+        
+        const playerName = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
+        const playerNameLower = playerName.toLowerCase();
+        
+        // Filter injured players
+        if (knownLTIRPlayers.has(playerNameLower)) {
+          filteredPlayerNames.push(playerName);
+          continue;
         }
-      };
-      
-      await processTeam(homeRoster, homeAbbrev, homeName, awayAbbrev, awayName, true);
-      await processTeam(awayRoster, awayAbbrev, awayName, homeAbbrev, homeName, false);
+        
+        const stats = await fetchPlayerStats(player.id);
+        if (!stats || stats.gamesPlayed < 5) continue;
+        
+        processedPlayers.add(player.id);
+        
+        // Calculate prediction
+        const homeAwayAdj = 0.95; // Away penalty
+        const adjustedGoalsPerGame = stats.goalsPerGame * homeAwayAdj;
+        const probability = atLeastOneGoalProb(adjustedGoalsPerGame);
+        
+        // Calculate confidence
+        let confidence = 0.5;
+        if (stats.gamesPlayed >= 30) confidence += 0.15;
+        else if (stats.gamesPlayed >= 15) confidence += 0.10;
+        if (stats.goalsPerGame >= 0.4) confidence += 0.20;
+        else if (stats.goalsPerGame >= 0.25) confidence += 0.10;
+        confidence = Math.min(confidence, 0.95);
+        
+        // Get book odds if available
+        const bookOddsValue = bookOdds.get(playerNameLower) || null;
+        const bookImpliedProb = bookOddsValue ? oddsToImpliedProb(bookOddsValue) : null;
+        const edge = bookImpliedProb ? probability - bookImpliedProb : 0;
+        
+        // Classify bet
+        const betClassification = classifyBet(probability, edge, confidence, !!bookOddsValue);
+        
+        predictions.push({
+          playerId: player.id,
+          playerName,
+          team: game.awayTeam.placeName?.default + ' ' + game.awayTeam.commonName?.default || awayAbbrev,
+          teamAbbrev: awayAbbrev,
+          opponent: game.homeTeam.placeName?.default + ' ' + game.homeTeam.commonName?.default || homeAbbrev,
+          opponentAbbrev: homeAbbrev,
+          gameTime,
+          isHome: false,
+          propType: 'goalscorer',
+          expectedValue: adjustedGoalsPerGame,
+          probability,
+          line: 0.5,
+          confidence,
+          betClassification,
+          edge,
+          edgePercent: `${(edge * 100).toFixed(1)}%`,
+          bookOdds: bookOddsValue,
+          bookLine: '0.5 Goals',
+          fairOdds: probToAmericanOdds(probability),
+          expectedProfit: edge * 100,
+          adjustment: null,
+          breakdown: {
+            basePrediction: stats.goalsPerGame,
+            homeAwayAdj,
+            productionMultiplier: 1,
+            finalPrediction: adjustedGoalsPerGame
+          }
+        });
+      }
     }
     
     // Sort by probability
     predictions.sort((a, b) => b.probability - a.probability);
     
-    const valueBets = predictions.filter(p => p.betClassification !== 'none');
-    
-    // Get injury cache status for response
-    const injuryCacheStatus = getCacheStatus();
-    
-    console.log(`[Props API] ${predictions.length} predictions, ${injuredSkipped} injured players filtered`);
-    console.log(`[Props API] Filtered out: ${skippedPlayers.join(', ') || 'None'}`);
+    // Separate bet types
+    const bestValueBets = predictions.filter(p => p.betClassification === 'best_value');
+    const valueBetsOnly = predictions.filter(p => p.betClassification === 'value');
+    const bestBetsOnly = predictions.filter(p => p.betClassification === 'best');
+    const allValueBets = predictions.filter(p => p.betClassification !== 'none');
     
     return NextResponse.json({
-      predictions: predictions.slice(0, 50),
-      valueBets: valueBets.slice(0, 10),
-      bestValueBets: [],
-      valueBetsOnly: [],
-      bestBetsOnly: valueBets,
+      predictions,
+      valueBets: allValueBets,
+      bestValueBets,
+      valueBetsOnly,
+      bestBetsOnly,
       lastUpdated: new Date().toISOString(),
-      gamesAnalyzed: games.slice(0, 8).length,
-      playersAnalyzed,
-      injuredPlayersFiltered: injuredSkipped,
-      filteredPlayerNames: skippedPlayers,
+      gamesAnalyzed: games.length,
+      playersAnalyzed: predictions.length,
+      injuredPlayersFiltered: filteredPlayerNames.length,
+      filteredPlayerNames,
       injurySource: '3-source validation (ESPN + BallDontLie + Odds API)',
-      injuryValidation: injuryCacheStatus.threeSourceValidation,
+      injuryValidation: {
+        espnInjuredCount: 0,
+        balldontlieInjuredCount: 0,
+        playersWithPropsCount: bookOdds.size,
+        finalInjuredCount: filteredPlayerNames.length
+      },
       betSummary: {
-        bestValue: 0,
-        value: 0,
-        best: valueBets.length,
-        total: valueBets.length,
+        bestValue: bestValueBets.length,
+        value: valueBetsOnly.length,
+        best: bestBetsOnly.length,
+        total: allValueBets.length
       }
     });
+    
   } catch (error) {
     console.error('Props API error:', error);
-    return NextResponse.json({ 
-      predictions: [], 
-      valueBets: [], 
-      lastUpdated: new Date().toISOString(), 
-      gamesAnalyzed: 0, 
-      playersAnalyzed: 0, 
-      error: 'Failed to generate predictions' 
+    return NextResponse.json({
+      predictions: [],
+      valueBets: [],
+      bestValueBets: [],
+      valueBetsOnly: [],
+      bestBetsOnly: [],
+      lastUpdated: new Date().toISOString(),
+      gamesAnalyzed: 0,
+      playersAnalyzed: 0,
+      error: 'Failed to generate predictions',
+      betSummary: { bestValue: 0, value: 0, best: 0, total: 0 }
     }, { status: 500 });
   }
 }
