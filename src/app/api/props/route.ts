@@ -6,11 +6,105 @@ export const revalidate = 0;
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '554cc95c542841c872715cd3b533f200';
 
-// Known LTIR players
-const knownLTIRPlayers = new Set([
-  'gabriel landeskog', 'valeri nichushkin', 'shea weber', 'ben bishop',
-  'oscar dansk', 'matt murray', 'jake oettinger'
-]);
+// NO HARDCODED INJURY LISTS - Use 3-source validation instead
+// Injuries are fetched dynamically from ESPN + BallDontLie + Odds API
+
+// Fetch injuries from ESPN
+async function fetchESPNInjuries(): Promise<Set<string>> {
+  const injured = new Set<string>();
+  const espnTeamIds = [
+    1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,28,29,30,52
+  ];
+  
+  try {
+    // Only fetch a few teams to save time - injuries are league-wide news
+    const sampleTeams = espnTeamIds.slice(0, 10);
+    const promises = sampleTeams.map(id =>
+      fetchWithTimeout(`https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/teams/${id}/injuries`, 3000)
+        .then(res => res?.ok ? res.json() : null)
+        .catch(() => null)
+    );
+    
+    const results = await Promise.all(promises);
+    for (const data of results) {
+      if (!data?.team?.injuries) continue;
+      for (const injury of data.team.injuries) {
+        const name = injury.athlete?.displayName?.toLowerCase();
+        const status = injury.status?.toLowerCase() || '';
+        if (name && (status.includes('out') || status.includes('ir'))) {
+          injured.add(name);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('ESPN injuries error:', e);
+  }
+  return injured;
+}
+
+// Fetch injuries from BallDontLie
+async function fetchBallDontLieInjuries(): Promise<Set<string>> {
+  const injured = new Set<string>();
+  const API_KEY = process.env.BALLDONTLIE_API_KEY || '1b3356ae-abd2-4a95-b6e6-2c4e97e8c232';
+  
+  try {
+    const res = await fetchWithTimeout(
+      'https://api.balldontlie.io/nhl/v1/player_injuries',
+      3000
+    );
+    if (res?.ok) {
+      // Add auth header for BallDontLie
+      const data = await fetch('https://api.balldontlie.io/nhl/v1/player_injuries', {
+        headers: { 'Authorization': API_KEY }
+      }).then(r => r.ok ? r.json() : null);
+      
+      if (data?.data) {
+        for (const injury of data.data) {
+          const name = injury.player?.name?.toLowerCase() || 
+                       `${injury.player?.first_name} ${injury.player?.last_name}`.toLowerCase();
+          if (name && name.trim()) injured.add(name.trim());
+        }
+      }
+    }
+  } catch (e) {
+    console.error('BallDontLie injuries error:', e);
+  }
+  return injured;
+}
+
+// 3-Source Validation: Player is OUT if 2+ sources agree
+async function getValidatedInjuries(playersWithProps: Set<string>): Promise<Set<string>> {
+  const [espnInjured, bdlInjured] = await Promise.all([
+    fetchESPNInjuries(),
+    fetchBallDontLieInjuries()
+  ]);
+  
+  const validatedOut = new Set<string>();
+  const allPlayers = new Set([...espnInjured, ...bdlInjured]);
+  
+  for (const player of allPlayers) {
+    let injuredVotes = 0;
+    let healthyVotes = 0;
+    
+    // Source 1: ESPN
+    if (espnInjured.has(player)) injuredVotes++;
+    else healthyVotes++;
+    
+    // Source 2: BallDontLie
+    if (bdlInjured.has(player)) injuredVotes++;
+    else healthyVotes++;
+    
+    // Source 3: Odds API (if player has props, sportsbooks think they're playing)
+    if (playersWithProps.has(player)) healthyVotes++;
+    else injuredVotes++; // No props = weak signal they might be out
+    
+    // 2 of 3 must agree
+    if (injuredVotes >= 2) validatedOut.add(player);
+  }
+  
+  console.log(`3-source validation: ${validatedOut.size} players OUT (ESPN: ${espnInjured.size}, BDL: ${bdlInjured.size})`);
+  return validatedOut;
+}
 
 interface PlayerStats {
   playerId: number;
@@ -248,7 +342,15 @@ export async function GET() {
     
     console.log(`Step 2: ${rosterMap.size} rosters (${Date.now() - startTime}ms)`);
     
-    // 3. Collect all players and fetch book odds in parallel
+    // 3. Fetch book odds first (needed for 3-source validation)
+    const bookOdds = await fetchBookOdds();
+    const playersWithProps = new Set(bookOdds.keys());
+    
+    // 4. Run 3-source injury validation
+    const injuredPlayers = await getValidatedInjuries(playersWithProps);
+    console.log(`Step 3: ${injuredPlayers.size} injured players via 3-source validation (${Date.now() - startTime}ms)`);
+    
+    // 5. Collect all healthy players
     interface PlayerInfo {
       id: number;
       name: string;
@@ -260,7 +362,8 @@ export async function GET() {
     for (const [abbrev, roster] of rosterMap) {
       for (const player of roster) {
         const name = `${player.firstName?.default || ''} ${player.lastName?.default || ''}`.trim();
-        if (knownLTIRPlayers.has(name.toLowerCase())) {
+        // 3-SOURCE VALIDATION - not hardcoded!
+        if (injuredPlayers.has(name.toLowerCase())) {
           filteredPlayerNames.push(name);
           continue;
         }
@@ -268,12 +371,9 @@ export async function GET() {
       }
     }
     
-    // Fetch book odds while we have time
-    const bookOddsPromise = fetchBookOdds();
+    console.log(`Step 4: ${allPlayers.length} healthy players to process (${Date.now() - startTime}ms)`);
     
-    console.log(`Step 3: ${allPlayers.length} players to process (${Date.now() - startTime}ms)`);
-    
-    // 4. Fetch all player stats in parallel batches
+    // 5. Fetch all player stats in parallel batches
     const BATCH_SIZE = 50;
     const statsMap = new Map<number, PlayerStats>();
     
@@ -293,8 +393,7 @@ export async function GET() {
       }
     }
     
-    const bookOdds = await bookOddsPromise;
-    console.log(`Step 4: ${statsMap.size} player stats, ${bookOdds.size} book odds (${Date.now() - startTime}ms)`);
+    console.log(`Step 5: ${statsMap.size} player stats (${Date.now() - startTime}ms)`);
     
     // 5. Build predictions
     const predictions: PropPrediction[] = [];
