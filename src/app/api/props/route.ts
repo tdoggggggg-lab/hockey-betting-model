@@ -103,13 +103,47 @@ function probToAmericanOdds(prob: number): number {
 // Fetch today's games from NHL API
 async function fetchTodaysGames(): Promise<any[]> {
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const res = await fetch(`https://api-web.nhle.com/v1/schedule/${today}`, {
-      next: { revalidate: 60 }
+    // Use Eastern timezone for NHL schedule (most games are ET-based)
+    const now = new Date();
+    const etOptions: Intl.DateTimeFormatOptions = { 
+      timeZone: 'America/New_York', 
+      year: 'numeric', 
+      month: '2-digit', 
+      day: '2-digit' 
+    };
+    const etDate = new Intl.DateTimeFormat('en-CA', etOptions).format(now);
+    
+    console.log(`Fetching NHL schedule for: ${etDate}`);
+    
+    const res = await fetch(`https://api-web.nhle.com/v1/schedule/${etDate}`, {
+      next: { revalidate: 60 },
+      headers: { 'Accept': 'application/json' }
     });
-    if (!res.ok) return [];
+    
+    if (!res.ok) {
+      console.error(`NHL API returned ${res.status}`);
+      return [];
+    }
+    
     const data = await res.json();
-    return data.gameWeek?.[0]?.games || [];
+    
+    // gameWeek is an array - find today's games
+    const allGames: any[] = [];
+    for (const day of data.gameWeek || []) {
+      if (day.date === etDate) {
+        allGames.push(...(day.games || []));
+      }
+    }
+    
+    // If no games for exact date, try the first day with games
+    if (allGames.length === 0 && data.gameWeek?.length > 0) {
+      const firstDay = data.gameWeek[0];
+      console.log(`No games for ${etDate}, using ${firstDay.date} with ${firstDay.games?.length || 0} games`);
+      allGames.push(...(firstDay.games || []));
+    }
+    
+    console.log(`Found ${allGames.length} games`);
+    return allGames;
   } catch (e) {
     console.error('Error fetching games:', e);
     return [];
