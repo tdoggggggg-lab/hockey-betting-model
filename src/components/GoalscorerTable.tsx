@@ -50,6 +50,14 @@ interface GameInfo {
 interface PropsData {
   predictions: PropPrediction[];
   valueBets: PropPrediction[];
+  games?: Array<{  // ✅ Games from API for dropdown
+    id: string;
+    homeAbbrev: string;
+    awayAbbrev: string;
+    homeName: string;
+    awayName: string;
+    gameTime: string;
+  }>;
   lastUpdated: string;
   gamesAnalyzed: number;
   playersAnalyzed: number;
@@ -119,23 +127,38 @@ export default function GoalscorerTable() {
     );
   }
 
-  // Build games list from ALL predictions (not filtered)
+  // Build games list - prefer API games array, fallback to building from predictions
   const gamesMap = new Map<string, GameInfo>();
-  propsData.predictions.forEach(pred => {
-    const awayAbbrev = pred.isHome ? pred.opponentAbbrev : pred.teamAbbrev;
-    const homeAbbrev = pred.isHome ? pred.teamAbbrev : pred.opponentAbbrev;
-    const gameId = `${awayAbbrev}-${homeAbbrev}`;
-    
-    if (!gamesMap.has(gameId)) {
-      gamesMap.set(gameId, {
-        id: gameId,
-        label: `${awayAbbrev} @ ${homeAbbrev}`,
-        awayAbbrev,
-        homeAbbrev,
-        gameTime: pred.gameTime,
+  
+  // Use games from API if available (all games, not just ones with players)
+  if (propsData.games && propsData.games.length > 0) {
+    propsData.games.forEach(game => {
+      gamesMap.set(game.id, {
+        id: game.id,
+        label: `${game.awayAbbrev} @ ${game.homeAbbrev}`,
+        awayAbbrev: game.awayAbbrev,
+        homeAbbrev: game.homeAbbrev,
+        gameTime: game.gameTime,
       });
-    }
-  });
+    });
+  } else {
+    // Fallback: build from predictions
+    propsData.predictions.forEach(pred => {
+      const awayAbbrev = pred.isHome ? pred.opponentAbbrev : pred.teamAbbrev;
+      const homeAbbrev = pred.isHome ? pred.teamAbbrev : pred.opponentAbbrev;
+      const gameId = `${awayAbbrev}-${homeAbbrev}`;
+      
+      if (!gamesMap.has(gameId)) {
+        gamesMap.set(gameId, {
+          id: gameId,
+          label: `${awayAbbrev} @ ${homeAbbrev}`,
+          awayAbbrev,
+          homeAbbrev,
+          gameTime: pred.gameTime,
+        });
+      }
+    });
+  }
   const games = Array.from(gamesMap.values());
 
   // Helper functions
