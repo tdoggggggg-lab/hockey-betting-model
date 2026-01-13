@@ -5,6 +5,7 @@ import DateTabs from '@/components/DateTabs';
 import BetTypesTabs from '@/components/BetTypesTabs';
 import GamesTable from '@/components/GamesTable';
 import PlayerPropsTable from '@/components/PlayerPropsTable';
+import GoalscorerTable from '@/components/GoalscorerTable';  // ✅ Use the fixed component
 import GoaliePropsTable from '@/components/GoaliePropsTable';
 
 interface Team {
@@ -136,13 +137,7 @@ export default function Home() {
         );
       
       case 'goalscorer':
-        return (
-          <PlayerPropsTable 
-            propType="goalscorer" 
-            title="Anytime Goalscorer" 
-            statLabel="Exp. Goals" 
-          />
-        );
+        return <GoalscorerTable />;  // ✅ Uses Top 10 + Top Picks cards
       
       case 'shots':
         return (
