@@ -265,8 +265,20 @@ async function fetchPlayerStats(playerId: number): Promise<PlayerStats | null> {
   }
 }
 
-// Fetch book odds
+// ⚠️ ODDS API CACHING - Required per project instructions (500 requests/month limit)
+const ODDS_CACHE_MINUTES = 5;
+let oddsCache: { data: Map<string, number>; timestamp: number } | null = null;
+
+// Fetch book odds WITH CACHING
 async function fetchBookOdds(): Promise<Map<string, number>> {
+  // Return cached data if fresh (less than 5 minutes old)
+  if (oddsCache && Date.now() - oddsCache.timestamp < ODDS_CACHE_MINUTES * 60 * 1000) {
+    console.log('Using cached Odds API data');
+    return oddsCache.data;
+  }
+  
+  console.log('Odds API call: /events (player_goal_scorer_anytime)'); // Always log!
+  
   const map = new Map<string, number>();
   try {
     const res = await fetchWithTimeout(
@@ -288,6 +300,10 @@ async function fetchBookOdds(): Promise<Map<string, number>> {
         }
       }
     }
+    
+    // Cache the result
+    oddsCache = { data: map, timestamp: Date.now() };
+    console.log(`Cached ${map.size} player odds for ${ODDS_CACHE_MINUTES} minutes`);
   } catch (e) {
     console.error('Book odds error:', e);
   }
