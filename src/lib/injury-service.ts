@@ -13,13 +13,15 @@
 // If 2+ say healthy → SHOW player
 // If all disagree → HIDE (conservative)
 //
+// ⚠️ NO HARDCODED PLAYER NAMES - All data from APIs dynamically
+// ⚠️ ODDS API CACHED - 5 minute minimum to stay under 500/month
+//
 // FEATURES:
 // 1. Multi-source validation (2 of 3 must agree)
-// 2. Auto player importance from stats
+// 2. Auto player importance from stats (NOT hardcoded names)
 // 3. Position value (G > D > C > W)
 // 4. Star concentration risk
-// 5. Long-term injury detection (Landeskog, etc.)
-// 6. Sportsbook validation (no props = not playing)
+// 5. Sportsbook validation (no props = not playing)
 // ============================================================
 
 // ============ TYPES ============
@@ -186,6 +188,7 @@ const LINEMATE_DROP_BY_TIER: Record<number, number> = {
 const LINE_PROMOTION_PENALTY = 0.85;
 
 // ============ ESPN TEAM MAP ============
+// This maps ESPN team IDs to NHL abbreviations - this is STABLE data (team IDs don't change)
 
 const ESPN_TEAM_MAP: Record<string, string> = {
   '1': 'BOS', '2': 'BUF', '3': 'CGY', '4': 'CAR', '5': 'CHI',
@@ -206,7 +209,7 @@ interface InjuryCache {
   teamImpacts: Map<string, TeamInjuryImpact>;
   allInjuredNames: Set<string>;
   returningPlayers: Map<string, ReturningPlayer>;
-  // NEW: Multi-source validation
+  // Multi-source validation
   espnInjured: Set<string>;
   balldontlieInjured: Set<string>;
   playersWithProps: Set<string>;  // Players who have sportsbook props (likely playing)
@@ -237,7 +240,11 @@ let injuryCache: InjuryCache = {
   timestamp: 0,
 };
 
-const CACHE_TTL = 7200000;
+const CACHE_TTL = 7200000; // 2 hours for main injury cache
+
+// ⚠️ ODDS API CACHE - Required per project instructions (500 requests/month limit)
+const ODDS_PROPS_CACHE_MINUTES = 5;
+let oddsPropsCache: { data: Set<string>; timestamp: number } | null = null;
 
 // ============ HELPERS ============
 
@@ -328,7 +335,7 @@ function calculateStarConcentration(players: any[], teamStats: any): StarConcent
   };
 }
 
-// ============ AUTO PLAYER IMPORTANCE ============
+// ============ AUTO PLAYER IMPORTANCE (FROM STATS, NOT NAMES) ============
 
 async function calculatePlayerImportance(
   player: any, teamStats: any, allTeamPlayers: any[]
@@ -430,7 +437,7 @@ async function calculateGoalieImportance(goalie: any, allGoalies: any[]): Promis
   };
 }
 
-// ============ FETCH ESPN INJURIES ============
+// ============ SOURCE 1: ESPN INJURIES ============
 
 async function fetchESPNInjuries(): Promise<Map<string, PlayerInjury[]>> {
   const injuries = new Map<string, PlayerInjury[]>();
@@ -498,8 +505,6 @@ async function fetchESPNInjuries(): Promise<Map<string, PlayerInjury[]>> {
 }
 
 // ============ SOURCE 2: BALLDONTLIE NHL API ============
-// Note: Requires free API key from balldontlie.io
-// If no key, this source is skipped
 
 async function fetchBALLDONTLIEInjuries(): Promise<Set<string>> {
   const injuredPlayers = new Set<string>();
@@ -507,14 +512,13 @@ async function fetchBALLDONTLIEInjuries(): Promise<Set<string>> {
   const BALLDONTLIE_API_KEY = process.env.BALLDONTLIE_API_KEY;
   
   if (!BALLDONTLIE_API_KEY) {
-    console.log('⚠️ No BALLDONTLIE_API_KEY - skipping this source (get free key at balldontlie.io)');
+    console.log('⚠️ No BALLDONTLIE_API_KEY - skipping this source');
     return injuredPlayers;
   }
   
   try {
     console.log('🔄 Fetching BALLDONTLIE injuries...');
     
-    // BALLDONTLIE NHL API
     const response = await fetch('https://api.balldontlie.io/nhl/v1/player_injuries', {
       headers: { 
         'Accept': 'application/json',
@@ -548,9 +552,16 @@ async function fetchBALLDONTLIEInjuries(): Promise<Set<string>> {
   return injuredPlayers;
 }
 
-// ============ SOURCE 3: THE ODDS API - PLAYERS WITH PROPS ============
+// ============ SOURCE 3: THE ODDS API - WITH CACHING ============
+// ⚠️ ODDS API has 500 requests/month limit - MUST CACHE
 
 async function fetchPlayersWithProps(): Promise<Set<string>> {
+  // ⚠️ CHECK CACHE FIRST - Required per project instructions
+  if (oddsPropsCache && Date.now() - oddsPropsCache.timestamp < ODDS_PROPS_CACHE_MINUTES * 60 * 1000) {
+    console.log(`✅ Using cached Odds API props data (${Math.round((Date.now() - oddsPropsCache.timestamp) / 1000)}s old)`);
+    return oddsPropsCache.data;
+  }
+  
   const playersWithProps = new Set<string>();
   
   const ODDS_API_KEY = process.env.ODDS_API_KEY;
@@ -560,7 +571,7 @@ async function fetchPlayersWithProps(): Promise<Set<string>> {
   }
   
   try {
-    console.log('🔄 Fetching players with sportsbook props...');
+    console.log('🔄 Odds API call: /events (props validation)'); // Always log API calls!
     
     // First get today's events
     const eventsRes = await fetch(
@@ -569,12 +580,14 @@ async function fetchPlayersWithProps(): Promise<Set<string>> {
     
     if (!eventsRes.ok) {
       console.log(`⚠️ Odds API events: ${eventsRes.status}`);
+      // Cache empty result to avoid hammering API on errors
+      oddsPropsCache = { data: playersWithProps, timestamp: Date.now() };
       return playersWithProps;
     }
     
     const events = await eventsRes.json();
     const remaining = eventsRes.headers.get('x-requests-remaining');
-    console.log(`📋 Odds API: ${events.length} events, ${remaining} credits left`);
+    console.log(`📋 Odds API: ${events.length} events, ${remaining} credits remaining`);
     
     // Filter to today's games only
     const now = new Date();
@@ -590,15 +603,19 @@ async function fetchPlayersWithProps(): Promise<Set<string>> {
     
     if (todayEvents.length === 0) {
       console.log('⚠️ No games today for props validation');
+      // Cache empty result
+      oddsPropsCache = { data: playersWithProps, timestamp: Date.now() };
       return playersWithProps;
     }
     
     // Fetch player props for up to 2 games (to save credits)
+    // ⚠️ This uses additional API calls - be conservative
     const eventsToCheck = todayEvents.slice(0, 2);
     
     for (const event of eventsToCheck) {
       try {
-        // Fetch anytime goalscorer props (most common)
+        console.log(`🔄 Odds API call: /events/${event.id}/odds (player props)`);
+        
         const propsRes = await fetch(
           `https://api.the-odds-api.com/v4/sports/icehockey_nhl/events/${event.id}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=player_goal_scorer_anytime&bookmakers=draftkings,fanduel`
         );
@@ -626,33 +643,21 @@ async function fetchPlayersWithProps(): Promise<Set<string>> {
     
     console.log(`✅ Odds API: ${playersWithProps.size} players have props (confirmed playing)`);
     
+    // ⚠️ CACHE THE RESULT
+    oddsPropsCache = { data: playersWithProps, timestamp: Date.now() };
+    console.log(`💾 Cached Odds API props for ${ODDS_PROPS_CACHE_MINUTES} minutes`);
+    
   } catch (error: any) {
     console.log(`⚠️ Odds API props error: ${error.message}`);
+    // Cache empty result on error to avoid hammering
+    oddsPropsCache = { data: playersWithProps, timestamp: Date.now() };
   }
   
   return playersWithProps;
 }
 
-// ============ KNOWN LONG-TERM INJURIES (MANUAL OVERRIDE) ============
-// These players have been out for extended periods and APIs may miss them
-// This is updated periodically - add any player out 10+ games
-
-const KNOWN_LTIR_PLAYERS: Record<string, { team: string; reason: string; since: string }> = {
-  // Colorado Avalanche
-  'gabriel landeskog': { team: 'COL', reason: 'Knee - LTIR (multiple surgeries)', since: '2022-10' },
-  'valeri nichushkin': { team: 'COL', reason: 'Personal/Stage 3 Player Assistance', since: '2024-05' },
-  
-  // Long-term injuries across the league (2024-25 season)
-  'shea weber': { team: 'VGK', reason: 'Retired - LTIR', since: '2021-07' },
-  'ben bishop': { team: 'DAL', reason: 'Retired - LTIR', since: '2021-10' },
-  'oscar dansk': { team: 'VGK', reason: 'Hip - LTIR', since: '2023-01' },
-  'matt murray': { team: 'TOR', reason: 'Concussion/Hip - out of NHL', since: '2024-02' },
-  
-  // Add any current season LTIR players here
-  // Format: 'lowercase name': { team: 'ABBREV', reason: 'Injury Type', since: 'YYYY-MM' }
-};
-
 // ============ MULTI-SOURCE VALIDATION ============
+// ⚠️ NO HARDCODED PLAYER NAMES - All validation is dynamic from 3 API sources
 
 function validatePlayerAvailability(
   playerName: string,
@@ -662,22 +667,6 @@ function validatePlayerAvailability(
   injuryDetails?: PlayerInjury
 ): PlayerAvailability {
   const normalized = normalizePlayerName(playerName);
-  
-  // Check known LTIR first (manual override - always OUT)
-  if (KNOWN_LTIR_PLAYERS[normalized]) {
-    return {
-      playerName,
-      normalizedName: normalized,
-      team: KNOWN_LTIR_PLAYERS[normalized].team,
-      espnStatus: 'injured',
-      balldontlieStatus: 'injured',
-      oddsStatus: 'no_props',
-      finalVerdict: 'OUT',
-      sourcesAgree: 3,
-      injuryDetails,
-      reasoning: `Known LTIR: ${KNOWN_LTIR_PLAYERS[normalized].reason} since ${KNOWN_LTIR_PLAYERS[normalized].since}`,
-    };
-  }
   
   // Determine status from each source
   const espnStatus: 'injured' | 'healthy' | 'unknown' = espnInjured.has(normalized) ? 'injured' : 'healthy';
@@ -905,13 +894,14 @@ async function calculateTeamImpact(teamAbbrev: string, injuries: PlayerInjury[])
 
 export async function refreshInjuryCache(): Promise<void> {
   console.log('🔄 Refreshing injury cache with 3-SOURCE VALIDATION...');
+  console.log('⚠️ NO HARDCODED PLAYERS - All data from APIs dynamically');
   const startTime = Date.now();
   
   // STEP 1: Fetch from all 3 sources in parallel
   const [espnInjuries, balldontlieInjured, playersWithProps] = await Promise.all([
     fetchESPNInjuries(),
     fetchBALLDONTLIEInjuries(),
-    fetchPlayersWithProps(),
+    fetchPlayersWithProps(),  // Now with caching!
   ]);
   
   // STEP 2: Build ESPN injured set from the injuries map
@@ -925,14 +915,11 @@ export async function refreshInjuryCache(): Promise<void> {
     }
   }
   
-  // STEP 3: Add known LTIR players to ESPN set (manual override)
-  for (const playerName of Object.keys(KNOWN_LTIR_PLAYERS)) {
-    espnInjured.add(playerName);
-  }
+  // ⚠️ NO HARDCODED LTIR PLAYERS - ESPN and BallDontLie track these automatically
   
   console.log(`📊 Sources: ESPN=${espnInjured.size}, BALLDONTLIE=${balldontlieInjured.size}, Props=${playersWithProps.size}`);
   
-  // STEP 4: Validate each potentially injured player
+  // STEP 3: Validate each potentially injured player
   const allPlayersToCheck = new Set([...espnInjured, ...balldontlieInjured]);
   const playerAvailability = new Map<string, PlayerAvailability>();
   const allInjuredNames = new Set<string>();
@@ -971,7 +958,7 @@ export async function refreshInjuryCache(): Promise<void> {
     }
   }
   
-  // STEP 5: Calculate team impacts with validated injuries
+  // STEP 4: Calculate team impacts with validated injuries
   const teamImpacts = new Map<string, TeamInjuryImpact>();
   
   for (const [teamAbbrev, teamInjuries] of espnInjuries) {
@@ -984,7 +971,7 @@ export async function refreshInjuryCache(): Promise<void> {
     teamImpacts.set(teamAbbrev, impact);
   }
   
-  // STEP 6: Update cache
+  // STEP 5: Update cache
   injuryCache = {
     ...injuryCache,
     injuries: espnInjuries,
@@ -1031,7 +1018,6 @@ export async function isPlayerInjured(playerName: string): Promise<boolean> {
   return injuryCache.allInjuredNames.has(normalizePlayerName(playerName));
 }
 
-// IMPORTANT: This is now ASYNC to ensure cache is fresh!
 export async function getInjuredPlayerNames(): Promise<Set<string>> {
   if (Date.now() - injuryCache.timestamp > CACHE_TTL) {
     await refreshInjuryCache();
@@ -1039,18 +1025,17 @@ export async function getInjuredPlayerNames(): Promise<Set<string>> {
   return injuryCache.allInjuredNames;
 }
 
-// NEW: Get validation details for a specific player
 export async function getPlayerAvailability(playerName: string): Promise<PlayerAvailability | null> {
   if (Date.now() - injuryCache.timestamp > CACHE_TTL) await refreshInjuryCache();
   return injuryCache.playerAvailability.get(normalizePlayerName(playerName)) || null;
 }
 
-// NEW: Get validation summary for debugging
 export function getValidationSummary() {
   return {
     ...injuryCache.validationSummary,
     cacheAge: Date.now() - injuryCache.timestamp,
     cacheValid: Date.now() - injuryCache.timestamp < CACHE_TTL,
+    oddsPropsCacheAge: oddsPropsCache ? Date.now() - oddsPropsCache.timestamp : null,
   };
 }
 
@@ -1185,10 +1170,10 @@ export function getCacheStatus() {
     teamsWithInjuries: injuryCache.injuries.size,
     totalInjuries, 
     starPlayersOut,
-    filteredFromProps: Array.from(injuryCache.allInjuredNames),  // All players filtered from props
+    filteredFromProps: Array.from(injuryCache.allInjuredNames),
     playersReturning: Array.from(injuryCache.returningPlayers.values()).map(p => `${p.playerName} (game ${p.gamesSinceReturn})`),
     teamsWithHighConcentration,
-    // NEW: 3-source validation summary
+    // 3-source validation summary
     threeSourceValidation: {
       espnInjuredCount: injuryCache.validationSummary.espnCount,
       balldontlieInjuredCount: injuryCache.validationSummary.balldontlieCount,
@@ -1198,6 +1183,12 @@ export function getCacheStatus() {
       uncertainDefaultedOut: injuryCache.validationSummary.uncertain,
       finalInjuredCount: injuryCache.allInjuredNames.size,
       validationDetails,
+    },
+    // Odds API cache status
+    oddsPropsCache: {
+      cached: oddsPropsCache !== null,
+      ageSeconds: oddsPropsCache ? Math.round((Date.now() - oddsPropsCache.timestamp) / 1000) : null,
+      playersCount: oddsPropsCache?.data.size || 0,
     },
   };
 }
