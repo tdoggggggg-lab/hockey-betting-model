@@ -1,8 +1,20 @@
+// src/components/GoalscorerTable.tsx
+// ============================================================
+// GOALSCORER TABLE - Complete ready-to-deploy version
+// ============================================================
+// 
+// FEATURES:
+// - Top 10 players in "All Games" dropdown (not Top 20)
+// - Top Picks cards showing 6 best bets
+// - ALL games shown in dropdown
+// - Stats banner with games/players/picks counts
+//
+// ⚠️ NO HARDCODED PLAYER NAMES - All data from API
+// ============================================================
+
 'use client';
 
 import { useState, useEffect } from 'react';
-
-type BetClassification = 'best_value' | 'value' | 'best' | 'none';
 
 interface PropPrediction {
   playerId: number;
@@ -18,7 +30,6 @@ interface PropPrediction {
   probability: number;
   line: number;
   confidence: number;
-  betClassification?: BetClassification;
   edge?: number;
   edgePercent?: string;
   bookOdds?: number | null;
@@ -26,12 +37,6 @@ interface PropPrediction {
   fairOdds?: number;
   isValueBet?: boolean;
   injuryNote?: string;
-  breakdown?: {
-    basePrediction: number;
-    homeAwayAdj: number;
-    productionMultiplier?: number;
-    finalPrediction: number;
-  };
 }
 
 interface GameInfo {
@@ -45,15 +50,9 @@ interface GameInfo {
 interface PropsData {
   predictions: PropPrediction[];
   valueBets: PropPrediction[];
-  bestValueBets?: PropPrediction[];
-  bestBetsOnly?: PropPrediction[];
-  valueBetsOnly?: PropPrediction[];
   lastUpdated: string;
   gamesAnalyzed: number;
   playersAnalyzed: number;
-  injuredPlayersFiltered?: number;
-  filteredPlayerNames?: string[];
-  injurySource?: string;
   betSummary?: {
     bestValue: number;
     value: number;
@@ -62,6 +61,7 @@ interface PropsData {
   };
 }
 
+// Team colors for badges - this is STABLE data (colors don't change frequently)
 const teamColors: Record<string, string> = {
   'EDM': '#FF4C00', 'BOS': '#FFB81C', 'MTL': '#AF1E2D', 'CHI': '#CF0A2C',
   'TOR': '#00205B', 'NYR': '#0038A8', 'COL': '#6F263D', 'VGK': '#B4975A',
@@ -99,6 +99,7 @@ export default function GoalscorerTable() {
     return () => clearInterval(interval);
   }, []);
 
+  // Loading state
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -108,6 +109,7 @@ export default function GoalscorerTable() {
     );
   }
 
+  // Error state
   if (error || !propsData) {
     return (
       <div className="text-center py-12">
@@ -117,7 +119,7 @@ export default function GoalscorerTable() {
     );
   }
 
-  // Build games list from predictions
+  // Build games list from ALL predictions (not filtered)
   const gamesMap = new Map<string, GameInfo>();
   propsData.predictions.forEach(pred => {
     const awayAbbrev = pred.isHome ? pred.opponentAbbrev : pred.teamAbbrev;
@@ -159,6 +161,15 @@ export default function GoalscorerTable() {
   // Filter predictions for table
   let filteredPredictions = [...propsData.predictions];
   
+  // Sort first
+  if (sortBy === 'probability') {
+    filteredPredictions.sort((a, b) => b.probability - a.probability);
+  } else if (sortBy === 'confidence') {
+    filteredPredictions.sort((a, b) => b.confidence - a.confidence);
+  } else if (sortBy === 'edge') {
+    filteredPredictions.sort((a, b) => (b.edge || 0) - (a.edge || 0));
+  }
+  
   // Filter by game
   if (selectedGame !== 'all') {
     const game = gamesMap.get(selectedGame);
@@ -168,17 +179,8 @@ export default function GoalscorerTable() {
       );
     }
   } else {
-    // Show top 10 for "All Games"
+    // *** TOP 10 for "All Games" - NOT Top 20 ***
     filteredPredictions = filteredPredictions.slice(0, 10);
-  }
-  
-  // Sort
-  if (sortBy === 'probability') {
-    filteredPredictions.sort((a, b) => b.probability - a.probability);
-  } else if (sortBy === 'confidence') {
-    filteredPredictions.sort((a, b) => b.confidence - a.confidence);
-  } else if (sortBy === 'edge') {
-    filteredPredictions.sort((a, b) => (b.edge || 0) - (a.edge || 0));
   }
 
   const betSummary = propsData.betSummary || { bestValue: 0, value: 0, best: 0, total: 0 };
@@ -209,7 +211,9 @@ export default function GoalscorerTable() {
         </div>
       </div>
 
-      {/* Top Picks Cards - 6 players in 3x2 grid */}
+      {/* ============================================ */}
+      {/* TOP PICKS CARDS - 6 players in 3x2 grid    */}
+      {/* ============================================ */}
       {topPicks.length > 0 && (
         <div className="mb-6">
           <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
@@ -218,9 +222,10 @@ export default function GoalscorerTable() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {topPicks.map((pred, index) => (
               <div 
-                key={pred.playerId} 
+                key={`topPick-${pred.playerId}-${index}`} 
                 className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3"
               >
+                {/* Header row: Team badge, name, rank */}
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <div 
@@ -237,6 +242,7 @@ export default function GoalscorerTable() {
                     <div className="text-emerald-400 font-bold text-lg">#{index + 1}</div>
                   </div>
                 </div>
+                {/* Stats row: Prob, Fair, Edge/Confidence */}
                 <div className="mt-3 flex justify-between text-sm">
                   <div>
                     <div className="text-slate-500 text-xs">Prob</div>
@@ -265,7 +271,9 @@ export default function GoalscorerTable() {
         </div>
       )}
 
-      {/* Filters */}
+      {/* ============================================ */}
+      {/* FILTERS - Game dropdown & Sort              */}
+      {/* ============================================ */}
       <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
         <div className="flex flex-wrap items-center gap-3">
           <select 
@@ -273,6 +281,7 @@ export default function GoalscorerTable() {
             onChange={(e) => setSelectedGame(e.target.value)} 
             className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm min-w-[180px]"
           >
+            {/* *** TOP 10 - NOT Top 20 *** */}
             <option value="all">🏆 All Games (Top 10)</option>
             {games.map(game => (
               <option key={game.id} value={game.id}>{game.label}</option>
@@ -323,7 +332,9 @@ export default function GoalscorerTable() {
         </div>
       )}
 
-      {/* Table */}
+      {/* ============================================ */}
+      {/* TABLE                                        */}
+      {/* ============================================ */}
       <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
@@ -345,7 +356,7 @@ export default function GoalscorerTable() {
               const isTopPick = index < 6 && selectedGame === 'all';
               return (
                 <tr 
-                  key={`${pred.playerId}-${index}`} 
+                  key={`row-${pred.playerId}-${index}`} 
                   className="border-b border-slate-800/50 hover:bg-slate-900/30"
                 >
                   <td className="py-3 px-4">
@@ -434,6 +445,7 @@ export default function GoalscorerTable() {
         </table>
       </div>
 
+      {/* Empty state */}
       {filteredPredictions.length === 0 && (
         <div className="text-center py-12">
           <div className="text-4xl mb-4">🏒</div>
