@@ -321,6 +321,7 @@ export async function GET() {
     if (games.length === 0) {
       return NextResponse.json({
         predictions: [], valueBets: [], bestValueBets: [], valueBetsOnly: [], bestBetsOnly: [],
+        games: [],  // ✅ Empty games array
         lastUpdated: new Date().toISOString(), gamesAnalyzed: 0, playersAnalyzed: 0,
         betSummary: { bestValue: 0, value: 0, best: 0, total: 0 }
       });
@@ -329,6 +330,9 @@ export async function GET() {
     // 2. Build team info and fetch rosters in parallel
     const teamInfoMap = new Map<string, { teamName: string; opponent: string; opponentAbbrev: string; gameTime: string; isHome: boolean }>();
     const teamAbbrevs = new Set<string>();
+    
+    // Build games list for dropdown (all games, not just ones with players)
+    const gamesList: Array<{ id: string; homeAbbrev: string; awayAbbrev: string; homeName: string; awayName: string; gameTime: string }> = [];
     
     for (const game of games) {
       const home = game.homeTeam?.abbrev;
@@ -344,6 +348,16 @@ export async function GET() {
       
       const homeName = `${game.homeTeam.placeName?.default || ''} ${game.homeTeam.commonName?.default || ''}`.trim();
       const awayName = `${game.awayTeam.placeName?.default || ''} ${game.awayTeam.commonName?.default || ''}`.trim();
+      
+      // Add to games list for dropdown
+      gamesList.push({
+        id: `${away}-${home}`,
+        homeAbbrev: home,
+        awayAbbrev: away,
+        homeName,
+        awayName,
+        gameTime
+      });
       
       teamInfoMap.set(home, { teamName: homeName, opponent: awayName, opponentAbbrev: away, gameTime, isHome: true });
       teamInfoMap.set(away, { teamName: awayName, opponent: homeName, opponentAbbrev: home, gameTime, isHome: false });
@@ -488,6 +502,7 @@ export async function GET() {
       bestValueBets,
       valueBetsOnly,
       bestBetsOnly,
+      games: gamesList,  // ✅ All games for dropdown
       lastUpdated: new Date().toISOString(),
       gamesAnalyzed: games.length,
       playersAnalyzed: predictions.length,
@@ -506,6 +521,7 @@ export async function GET() {
     console.error('Props API error:', error);
     return NextResponse.json({
       predictions: [], valueBets: [], bestValueBets: [], valueBetsOnly: [], bestBetsOnly: [],
+      games: [],  // ✅ Empty games array
       lastUpdated: new Date().toISOString(), gamesAnalyzed: 0, playersAnalyzed: 0,
       error: 'Failed to generate predictions',
       betSummary: { bestValue: 0, value: 0, best: 0, total: 0 }
