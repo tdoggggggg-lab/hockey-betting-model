@@ -201,16 +201,24 @@ export default function PropsTable({ propType }: PropsTableProps) {
   }
   const games = Array.from(gamesMap.values());
 
-  // Get top 6 picks for the cards (sorted by probability)
+  // Get top 6 picks for the cards (sorted by probability, then name for consistency)
   const topPicks = [...propsData.predictions]
-    .sort((a, b) => b.probability - a.probability)
+    .sort((a, b) => {
+      if (b.probability !== a.probability) return b.probability - a.probability;
+      return a.playerName.localeCompare(b.playerName);
+    })
     .slice(0, 6);
 
   // Filter predictions
   let filteredPredictions: PropPrediction[];
   
   if (selectedGame === 'all') {
-    filteredPredictions = [...propsData.predictions].sort((a, b) => b.probability - a.probability).slice(0, 10);
+    filteredPredictions = [...propsData.predictions]
+      .sort((a, b) => {
+        if (b.probability !== a.probability) return b.probability - a.probability;
+        return a.playerName.localeCompare(b.playerName);
+      })
+      .slice(0, 10);
   } else {
     const game = gamesMap.get(selectedGame);
     if (game) {
@@ -227,13 +235,22 @@ export default function PropsTable({ propType }: PropsTableProps) {
     filteredPredictions = filteredPredictions.filter(p => p.betClassification !== 'none');
   }
   
-  // Sort
+  // Sort (with deterministic tie-breaking by player name)
   if (sortBy === 'probability') {
-    filteredPredictions = [...filteredPredictions].sort((a, b) => b.probability - a.probability);
+    filteredPredictions = [...filteredPredictions].sort((a, b) => {
+      if (b.probability !== a.probability) return b.probability - a.probability;
+      return a.playerName.localeCompare(b.playerName);
+    });
   } else if (sortBy === 'confidence') {
-    filteredPredictions = [...filteredPredictions].sort((a, b) => b.confidence - a.confidence);
+    filteredPredictions = [...filteredPredictions].sort((a, b) => {
+      if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+      return a.playerName.localeCompare(b.playerName);
+    });
   } else if (sortBy === 'edge') {
-    filteredPredictions = [...filteredPredictions].sort((a, b) => b.edge - a.edge);
+    filteredPredictions = [...filteredPredictions].sort((a, b) => {
+      if (b.edge !== a.edge) return b.edge - a.edge;
+      return a.playerName.localeCompare(b.playerName);
+    });
   }
 
   const formatProbability = (prob: number) => `${(prob * 100).toFixed(1)}%`;
