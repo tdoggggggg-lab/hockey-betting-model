@@ -39,6 +39,14 @@ interface GameInfo {
 interface PropsData {
   predictions: PropPrediction[];
   valueBets: PropPrediction[];
+  games?: Array<{  // ✅ Games from API for dropdown
+    id: string;
+    homeAbbrev: string;
+    awayAbbrev: string;
+    homeName: string;
+    awayName: string;
+    gameTime: string;
+  }>;
   lastUpdated: string;
   gamesAnalyzed: number;
   playersAnalyzed: number;
@@ -80,18 +88,18 @@ function getBetBadge(classification: BetClassification): { text: string; classNa
   switch (classification) {
     case 'best_value':
       return {
-        text: 'Best Value',
-        className: 'bg-gradient-to-r from-yellow-600/30 to-emerald-600/30 border border-yellow-500/50 text-yellow-300',
+        text: '⭐ Best Bet',
+        className: 'bg-amber-500/20 text-amber-400',
       };
     case 'value':
       return {
-        text: 'Value',
-        className: 'bg-emerald-500/20 border border-emerald-500/50 text-emerald-400',
+        text: '💰 Value Bet',
+        className: 'bg-emerald-500/20 text-emerald-400',
       };
     case 'best':
       return {
-        text: 'Best',
-        className: 'bg-blue-500/20 border border-blue-500/50 text-blue-400',
+        text: '🎯 Best',
+        className: 'bg-blue-500/20 text-blue-400',
       };
     default:
       return {
@@ -159,30 +167,50 @@ export default function PropsTable({ propType }: PropsTableProps) {
     );
   }
 
-  // Build games list
+  // Build games list - prefer API games array, fallback to building from predictions
   const gamesMap = new Map<string, GameInfo>();
-  propsData.predictions.forEach(pred => {
-    const awayAbbrev = pred.isHome ? pred.opponentAbbrev : pred.teamAbbrev;
-    const homeAbbrev = pred.isHome ? pred.teamAbbrev : pred.opponentAbbrev;
-    const gameId = `${awayAbbrev}-${homeAbbrev}`;
-    
-    if (!gamesMap.has(gameId)) {
-      gamesMap.set(gameId, {
-        id: gameId,
-        label: `${awayAbbrev} @ ${homeAbbrev}`,
-        awayAbbrev,
-        homeAbbrev,
-        gameTime: pred.gameTime,
+  
+  // Use games from API if available (all games, not just ones with players)
+  if (propsData.games && propsData.games.length > 0) {
+    propsData.games.forEach(game => {
+      gamesMap.set(game.id, {
+        id: game.id,
+        label: `${game.awayAbbrev} @ ${game.homeAbbrev}`,
+        awayAbbrev: game.awayAbbrev,
+        homeAbbrev: game.homeAbbrev,
+        gameTime: game.gameTime,
       });
-    }
-  });
+    });
+  } else {
+    // Fallback: build from predictions
+    propsData.predictions.forEach(pred => {
+      const awayAbbrev = pred.isHome ? pred.opponentAbbrev : pred.teamAbbrev;
+      const homeAbbrev = pred.isHome ? pred.teamAbbrev : pred.opponentAbbrev;
+      const gameId = `${awayAbbrev}-${homeAbbrev}`;
+      
+      if (!gamesMap.has(gameId)) {
+        gamesMap.set(gameId, {
+          id: gameId,
+          label: `${awayAbbrev} @ ${homeAbbrev}`,
+          awayAbbrev,
+          homeAbbrev,
+          gameTime: pred.gameTime,
+        });
+      }
+    });
+  }
   const games = Array.from(gamesMap.values());
+
+  // Get top 6 picks for the cards (sorted by probability)
+  const topPicks = [...propsData.predictions]
+    .sort((a, b) => b.probability - a.probability)
+    .slice(0, 6);
 
   // Filter predictions
   let filteredPredictions: PropPrediction[];
   
   if (selectedGame === 'all') {
-    filteredPredictions = [...propsData.predictions].sort((a, b) => b.probability - a.probability).slice(0, 20);
+    filteredPredictions = [...propsData.predictions].sort((a, b) => b.probability - a.probability).slice(0, 10);
   } else {
     const game = gamesMap.get(selectedGame);
     if (game) {
@@ -267,11 +295,74 @@ export default function PropsTable({ propType }: PropsTableProps) {
         </div>
       )}
 
+      {/* Top Picks Cards - 6 players in 3x2 grid */}
+      {topPicks.length > 0 && (
+        <div className="mb-6">
+          <h3 className="text-lg font-semibold text-white mb-3 flex items-center gap-2">
+            🎯 Top Picks
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {topPicks.map((pred, index) => (
+              <div 
+                key={`topPick-${pred.playerId}-${index}`} 
+                className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-3"
+              >
+                {/* Header row: Team badge, name, rank */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div 
+                      className="w-10 h-10 rounded flex items-center justify-center text-xs font-bold" 
+                      style={{ backgroundColor: teamColors[pred.teamAbbrev] || '#374151', color: 'white' }}
+                    >
+                      {pred.teamAbbrev}
+                    </div>
+                    <div>
+                      <div className="font-medium text-white">{pred.playerName}</div>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-emerald-400 font-bold text-lg">#{index + 1}</div>
+                  </div>
+                </div>
+                {/* Stats row: Prob, Fair, Edge/Confidence */}
+                <div className="mt-3 flex justify-between text-sm">
+                  <div>
+                    <div className="text-slate-500 text-xs">Prob</div>
+                    <div className="text-white font-semibold">{(pred.probability * 100).toFixed(1)}%</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-500 text-xs">Fair</div>
+                    <div className="text-emerald-400 font-semibold">
+                      {pred.probability >= 0.5 
+                        ? Math.round((-100 * pred.probability) / (1 - pred.probability))
+                        : `+${Math.round((100 * (1 - pred.probability)) / pred.probability)}`
+                      }
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-slate-500 text-xs">&nbsp;</div>
+                    {pred.edge > 0.03 ? (
+                      <span className="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded">
+                        +{(pred.edge * 100).toFixed(1)}%
+                      </span>
+                    ) : (
+                      <span className="text-slate-400 text-sm">
+                        {Math.round(pred.confidence * 100)}%
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
         <div className="flex flex-wrap items-center gap-3">
           <select value={selectedGame} onChange={(e) => handleGameChange(e.target.value)} className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm min-w-[200px]">
-            <option value="all">🏆 All Games (Top 20)</option>
+            <option value="all">🏆 All Games (Top 10)</option>
             {games.map(game => (
               <option key={game.id} value={game.id}>{game.label}</option>
             ))}
