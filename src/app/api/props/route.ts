@@ -12,14 +12,14 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY || '554cc95c542841c872715cd3b533f2
 // Fetch injuries from ESPN
 async function fetchESPNInjuries(): Promise<Set<string>> {
   const injured = new Set<string>();
+  // ESPN team IDs for all 32 NHL teams
   const espnTeamIds = [
     1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,28,29,30,52
   ];
   
   try {
-    // Only fetch a few teams to save time - injuries are league-wide news
-    const sampleTeams = espnTeamIds.slice(0, 10);
-    const promises = sampleTeams.map(id =>
+    // Fetch ALL teams - injuries are critical for accuracy
+    const promises = espnTeamIds.map(id =>
       fetchWithTimeout(`https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/teams/${id}/injuries`, 3000)
         .then(res => res?.ok ? res.json() : null)
         .catch(() => null)
@@ -31,7 +31,8 @@ async function fetchESPNInjuries(): Promise<Set<string>> {
       for (const injury of data.team.injuries) {
         const name = injury.athlete?.displayName?.toLowerCase();
         const status = injury.status?.toLowerCase() || '';
-        if (name && (status.includes('out') || status.includes('ir'))) {
+        // Include day-to-day as potentially out
+        if (name && (status.includes('out') || status.includes('ir') || status.includes('day-to-day'))) {
           injured.add(name);
         }
       }
@@ -48,23 +49,29 @@ async function fetchBallDontLieInjuries(): Promise<Set<string>> {
   const API_KEY = process.env.BALLDONTLIE_API_KEY || '1b3356ae-abd2-4a95-b6e6-2c4e97e8c232';
   
   try {
-    const res = await fetchWithTimeout(
-      'https://api.balldontlie.io/nhl/v1/player_injuries',
-      3000
-    );
-    if (res?.ok) {
-      // Add auth header for BallDontLie
-      const data = await fetch('https://api.balldontlie.io/nhl/v1/player_injuries', {
-        headers: { 'Authorization': API_KEY }
-      }).then(r => r.ok ? r.json() : null);
-      
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    
+    const res = await fetch('https://api.balldontlie.io/nhl/v1/player_injuries', {
+      headers: { 'Authorization': API_KEY },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    
+    if (res.ok) {
+      const data = await res.json();
       if (data?.data) {
         for (const injury of data.data) {
           const name = injury.player?.name?.toLowerCase() || 
-                       `${injury.player?.first_name} ${injury.player?.last_name}`.toLowerCase();
-          if (name && name.trim()) injured.add(name.trim());
+                       `${injury.player?.first_name || ''} ${injury.player?.last_name || ''}`.toLowerCase().trim();
+          if (name && name.trim()) {
+            injured.add(name.trim());
+          }
         }
+        console.log(`BallDontLie: Found ${injured.size} injured players`);
       }
+    } else {
+      console.error(`BallDontLie API error: HTTP ${res.status}`);
     }
   } catch (e) {
     console.error('BallDontLie injuries error:', e);
@@ -80,29 +87,46 @@ async function getValidatedInjuries(playersWithProps: Set<string>): Promise<Set<
   ]);
   
   const validatedOut = new Set<string>();
-  const allPlayers = new Set([...espnInjured, ...bdlInjured]);
+  const allPotentiallyInjured = new Set([...espnInjured, ...bdlInjured]);
   
-  for (const player of allPlayers) {
+  console.log(`Injury sources: ESPN=${espnInjured.size}, BDL=${bdlInjured.size}, Props=${playersWithProps.size}`);
+  
+  for (const player of allPotentiallyInjured) {
     let injuredVotes = 0;
     let healthyVotes = 0;
     
-    // Source 1: ESPN
-    if (espnInjured.has(player)) injuredVotes++;
-    else healthyVotes++;
+    // Source 1: ESPN - only count if they have data
+    if (espnInjured.has(player)) {
+      injuredVotes++;
+    }
+    // Note: NOT being in ESPN doesn't mean healthy - just no data
     
-    // Source 2: BallDontLie
-    if (bdlInjured.has(player)) injuredVotes++;
-    else healthyVotes++;
+    // Source 2: BallDontLie - only count if they have data
+    if (bdlInjured.has(player)) {
+      injuredVotes++;
+    }
+    // Note: NOT being in BDL doesn't mean healthy - just no data
     
-    // Source 3: Odds API (if player has props, sportsbooks think they're playing)
-    if (playersWithProps.has(player)) healthyVotes++;
-    else injuredVotes++; // No props = weak signal they might be out
+    // Source 3: Odds API - if player has props, sportsbooks think they're playing
+    if (playersWithProps.has(player)) {
+      healthyVotes++;
+    }
+    // Note: NOT having props is a weak signal - don't count as injured vote
     
-    // 2 of 3 must agree
-    if (injuredVotes >= 2) validatedOut.add(player);
+    // Decision: If ANY injury source flags them AND no props exist, they're OUT
+    // If they have props, need 2 injury sources to override
+    if (injuredVotes >= 2) {
+      validatedOut.add(player);
+      console.log(`INJURED (2+ sources): ${player}`);
+    } else if (injuredVotes >= 1 && healthyVotes === 0) {
+      // Single source says injured AND no props = probably out
+      validatedOut.add(player);
+      console.log(`INJURED (1 source, no props): ${player}`);
+    }
+    // If 1 injured vote but has props, trust the sportsbooks (they're usually right)
   }
   
-  console.log(`3-source validation: ${validatedOut.size} players OUT (ESPN: ${espnInjured.size}, BDL: ${bdlInjured.size})`);
+  console.log(`3-source validation: ${validatedOut.size} players OUT`);
   return validatedOut;
 }
 
@@ -258,7 +282,10 @@ async function fetchTeamRoster(abbrev: string): Promise<any[]> {
   
   try {
     const res = await fetchWithTimeout(`https://api-web.nhle.com/v1/roster/${abbrev}/current`, 5000);
-    if (!res?.ok) return [];
+    if (!res?.ok) {
+      console.error(`Roster fetch FAILED for ${abbrev}: HTTP ${res?.status}`);
+      return [];
+    }
     
     const data = await res.json();
     const forwards = data.forwards || [];
@@ -267,11 +294,18 @@ async function fetchTeamRoster(abbrev: string): Promise<any[]> {
     // Return all skaters (no limit)
     const roster = [...forwards, ...defensemen];
     
+    if (roster.length === 0) {
+      console.error(`Roster EMPTY for ${abbrev} - NHL API returned no players`);
+    } else {
+      console.log(`Roster for ${abbrev}: ${roster.length} players`);
+    }
+    
     // Cache the result
     rosterCache.set(abbrev, { data: roster, timestamp: Date.now() });
     
     return roster;
-  } catch {
+  } catch (e) {
+    console.error(`Roster fetch ERROR for ${abbrev}:`, e);
     return [];
   }
 }
