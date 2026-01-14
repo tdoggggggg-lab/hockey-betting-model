@@ -370,13 +370,12 @@ export default function GoalscorerTable() {
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Fair Odds</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Book Odds</th>
               <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Confidence</th>
-              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Status</th>
+              <th className="text-center py-3 px-2 text-slate-400 font-medium text-sm">Bets</th>
             </tr>
           </thead>
           <tbody>
             {filteredPredictions.map((pred, index) => {
               const confDisplay = formatConfidence(pred.confidence);
-              const isTopPick = index < 6 && selectedGame === 'all';
               return (
                 <tr 
                   key={`row-${pred.playerId}-${index}`} 
@@ -453,9 +452,14 @@ export default function GoalscorerTable() {
                     </div>
                   </td>
                   <td className="py-3 px-2 text-center">
-                    {isTopPick ? (
+                    {/* Best Bet: edge > 8% AND high confidence */}
+                    {pred.edge && pred.edge > 0.08 && pred.confidence >= 0.75 ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-1 bg-amber-500/20 text-amber-400 rounded text-xs font-medium">
+                        ⭐ Best Bet
+                      </span>
+                    ) : pred.isValueBet || (pred.edge && pred.edge > 0.05) ? (
                       <span className="inline-flex items-center gap-1 px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded text-xs font-medium">
-                        🎯 Pick
+                        💰 Value Bet
                       </span>
                     ) : (
                       <span className="text-slate-600 text-xs">-</span>
