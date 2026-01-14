@@ -114,6 +114,28 @@ interface PlayerStats {
   goalsPerGame: number;
 }
 
+// ========================================
+// CACHING CONFIGURATION
+// ========================================
+
+// ⚠️ ODDS API CACHING - Required per project instructions (500 requests/month limit)
+const ODDS_CACHE_MINUTES = 5;
+let oddsCache: { data: Map<string, number>; timestamp: number } | null = null;
+
+// ✅ FULL RESPONSE CACHING - Prevents inconsistent results on refresh
+const RESPONSE_CACHE_MINUTES = 2;
+let responseCache: { data: any; timestamp: number } | null = null;
+
+// ✅ ROSTER CACHING - Rosters don't change mid-day
+const ROSTER_CACHE_MINUTES = 30;
+const rosterCache = new Map<string, { data: any[]; timestamp: number }>();
+
+// ✅ PLAYER STATS CACHING - Stats don't change during the day
+const STATS_CACHE_MINUTES = 30;
+const statsCache = new Map<number, { data: PlayerStats | null; timestamp: number }>();
+
+// ========================================
+
 interface PropPrediction {
   playerId: number;
   playerName: string;
@@ -226,8 +248,14 @@ async function fetchTodaysGames(): Promise<any[]> {
   }
 }
 
-// Fetch roster - only forwards and defensemen, limit to top players
+// Fetch roster - only forwards and defensemen, with caching
 async function fetchTeamRoster(abbrev: string): Promise<any[]> {
+  // Check cache first
+  const cached = rosterCache.get(abbrev);
+  if (cached && Date.now() - cached.timestamp < ROSTER_CACHE_MINUTES * 60 * 1000) {
+    return cached.data;
+  }
+  
   try {
     const res = await fetchWithTimeout(`https://api-web.nhle.com/v1/roster/${abbrev}/current`, 5000);
     if (!res?.ok) return [];
@@ -237,37 +265,56 @@ async function fetchTeamRoster(abbrev: string): Promise<any[]> {
     const defensemen = data.defensemen || [];
     
     // Return all skaters (no limit)
-    return [...forwards, ...defensemen];
+    const roster = [...forwards, ...defensemen];
+    
+    // Cache the result
+    rosterCache.set(abbrev, { data: roster, timestamp: Date.now() });
+    
+    return roster;
   } catch {
     return [];
   }
 }
 
-// Fetch player stats - simplified to just get goals/games
+// Fetch player stats - simplified to just get goals/games, with caching
 async function fetchPlayerStats(playerId: number): Promise<PlayerStats | null> {
+  // Check cache first
+  const cached = statsCache.get(playerId);
+  if (cached && Date.now() - cached.timestamp < STATS_CACHE_MINUTES * 60 * 1000) {
+    return cached.data;
+  }
+  
   try {
     const res = await fetchWithTimeout(`https://api-web.nhle.com/v1/player/${playerId}/landing`, 3000);
-    if (!res?.ok) return null;
+    if (!res?.ok) {
+      statsCache.set(playerId, { data: null, timestamp: Date.now() });
+      return null;
+    }
     
     const data = await res.json();
     const season = data.featuredStats?.regularSeason?.subSeason;
-    if (!season || season.gamesPlayed < 5) return null;
+    if (!season || season.gamesPlayed < 5) {
+      statsCache.set(playerId, { data: null, timestamp: Date.now() });
+      return null;
+    }
     
-    return {
+    const stats: PlayerStats = {
       playerId: data.playerId,
       playerName: `${data.firstName?.default || ''} ${data.lastName?.default || ''}`.trim(),
       gamesPlayed: season.gamesPlayed || 0,
       goals: season.goals || 0,
       goalsPerGame: season.gamesPlayed > 0 ? (season.goals || 0) / season.gamesPlayed : 0
     };
+    
+    // Cache the result
+    statsCache.set(playerId, { data: stats, timestamp: Date.now() });
+    
+    return stats;
   } catch {
+    statsCache.set(playerId, { data: null, timestamp: Date.now() });
     return null;
   }
 }
-
-// ⚠️ ODDS API CACHING - Required per project instructions (500 requests/month limit)
-const ODDS_CACHE_MINUTES = 5;
-let oddsCache: { data: Map<string, number>; timestamp: number } | null = null;
 
 // Fetch book odds WITH CACHING
 async function fetchBookOdds(): Promise<Map<string, number>> {
@@ -312,6 +359,12 @@ async function fetchBookOdds(): Promise<Map<string, number>> {
 
 export async function GET() {
   const startTime = Date.now();
+  
+  // ✅ Return cached response if fresh (prevents inconsistent results on refresh)
+  if (responseCache && Date.now() - responseCache.timestamp < RESPONSE_CACHE_MINUTES * 60 * 1000) {
+    console.log('Using cached props response');
+    return NextResponse.json(responseCache.data);
+  }
   
   try {
     // 1. Fetch games
@@ -417,7 +470,7 @@ export async function GET() {
       }
       
       // Check timeout - Vercel free tier has 10s limit
-      if (Date.now() - startTime > 8000) {
+      if (Date.now() - startTime > 9000) {
         console.log(`Timeout warning at ${i + BATCH_SIZE} players`);
         break;
       }
@@ -485,8 +538,15 @@ export async function GET() {
       });
     }
     
-    // Sort by probability
-    predictions.sort((a, b) => b.probability - a.probability);
+    // Sort by probability, then by player name for deterministic ordering
+    predictions.sort((a, b) => {
+      // Primary: probability (descending)
+      if (b.probability !== a.probability) {
+        return b.probability - a.probability;
+      }
+      // Secondary: player name (alphabetical) for consistent tie-breaking
+      return a.playerName.localeCompare(b.playerName);
+    });
     
     // Categorize bets
     const bestValueBets = predictions.filter(p => p.betClassification === 'best_value');
@@ -496,7 +556,8 @@ export async function GET() {
     
     console.log(`Done: ${predictions.length} predictions in ${Date.now() - startTime}ms`);
     
-    return NextResponse.json({
+    // ✅ Build response and cache it
+    const response = {
       predictions,
       valueBets: allValueBets,
       bestValueBets,
@@ -515,7 +576,13 @@ export async function GET() {
         best: bestBetsOnly.length,
         total: allValueBets.length
       }
-    });
+    };
+    
+    // Cache the response for consistent results on refresh
+    responseCache = { data: response, timestamp: Date.now() };
+    console.log(`Cached response for ${RESPONSE_CACHE_MINUTES} minutes`);
+    
+    return NextResponse.json(response);
     
   } catch (error) {
     console.error('Props API error:', error);
