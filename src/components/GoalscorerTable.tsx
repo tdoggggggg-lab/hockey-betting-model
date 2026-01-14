@@ -176,21 +176,34 @@ export default function GoalscorerTable() {
     return { dots: '●○○', color: 'text-slate-500', label: 'Low' };
   };
 
-  // Get top 6 picks for the cards (sorted by probability)
+  // Get top 6 picks for the cards (sorted by probability, then name for consistency)
   const topPicks = [...propsData.predictions]
-    .sort((a, b) => b.probability - a.probability)
+    .sort((a, b) => {
+      if (b.probability !== a.probability) return b.probability - a.probability;
+      return a.playerName.localeCompare(b.playerName);
+    })
     .slice(0, 6);
 
   // Filter predictions for table
   let filteredPredictions = [...propsData.predictions];
   
-  // Sort first
+  // Sort first (with deterministic tie-breaking by player name)
   if (sortBy === 'probability') {
-    filteredPredictions.sort((a, b) => b.probability - a.probability);
+    filteredPredictions.sort((a, b) => {
+      if (b.probability !== a.probability) return b.probability - a.probability;
+      return a.playerName.localeCompare(b.playerName);
+    });
   } else if (sortBy === 'confidence') {
-    filteredPredictions.sort((a, b) => b.confidence - a.confidence);
+    filteredPredictions.sort((a, b) => {
+      if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+      return a.playerName.localeCompare(b.playerName);
+    });
   } else if (sortBy === 'edge') {
-    filteredPredictions.sort((a, b) => (b.edge || 0) - (a.edge || 0));
+    filteredPredictions.sort((a, b) => {
+      const edgeDiff = (b.edge || 0) - (a.edge || 0);
+      if (edgeDiff !== 0) return edgeDiff;
+      return a.playerName.localeCompare(b.playerName);
+    });
   }
   
   // Filter by game
