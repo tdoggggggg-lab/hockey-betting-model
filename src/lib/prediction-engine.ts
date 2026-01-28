@@ -149,7 +149,7 @@ const teamDefenseCache = new Map<string, Cache<TeamDefense>>();
 
 // ============ NHL API HELPERS ============
 
-async function fetchWithTimeout(url: string, timeout = 5000): Promise<Response | null> {
+async function fetchWithTimeout(url: string, timeout = 10000): Promise<Response | null> {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   try {
@@ -920,14 +920,25 @@ export async function predictMultiplePlayers(
     
     const batchPromises = batch.map(async (player) => {
       const gameLogs = await fetchPlayerGameLogs(player.playerId);
+
+      if (gameLogs.length === 0) {
+        console.log(`[Predict] ${player.playerName}: No game logs returned`);
+        return null;
+      }
+
+      if (gameLogs.length < MIN_GAMES_FOR_PREDICTION) {
+        console.log(`[Predict] ${player.playerName}: Only ${gameLogs.length} games (need ${MIN_GAMES_FOR_PREDICTION})`);
+        return null;
+      }
+
       const playerStats = calculatePlayerStats(
-        player.playerId, 
-        player.playerName, 
-        player.teamAbbrev, 
-        player.position, 
+        player.playerId,
+        player.playerName,
+        player.teamAbbrev,
+        player.position,
         gameLogs
       );
-      
+
       if (!playerStats) return null;
       
       // Quality filter
