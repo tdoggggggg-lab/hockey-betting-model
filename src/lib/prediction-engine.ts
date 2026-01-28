@@ -912,7 +912,8 @@ export async function predictMultiplePlayers(
   });
   
   // Predict for each player (game logs fetched in parallel batches)
-  const BATCH_SIZE = 10;
+  // Increased batch size to reduce total rounds and fit within Vercel timeout
+  const BATCH_SIZE = 50;
   const results: PredictionResult[] = [];
   
   for (let i = 0; i < players.length; i += BATCH_SIZE) {

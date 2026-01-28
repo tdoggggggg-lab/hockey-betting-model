@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "src/app/api/props/route.ts": {
+      "maxDuration": 60
+    }
+  },
   "crons": [
     {
       "path": "/api/cron/schedule",
