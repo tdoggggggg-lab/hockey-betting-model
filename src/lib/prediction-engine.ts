@@ -194,7 +194,7 @@ export async function fetchPlayerGameLogs(playerId: number): Promise<PlayerGameL
   const url = `https://api-web.nhle.com/v1/player/${playerId}/game-log/${season}/2`;
   
   try {
-    const res = await fetchWithTimeout(url, 5000);
+    const res = await fetchWithTimeout(url, 10000);
     if (!res?.ok) {
       console.log(`[GameLogs] Failed for player ${playerId}: ${res?.status}`);
       return [];
@@ -241,7 +241,7 @@ export async function fetchTeamDefense(teamAbbrev: string): Promise<TeamDefense 
   const url = `https://api-web.nhle.com/v1/club-stats/${teamAbbrev}/now`;
   
   try {
-    const res = await fetchWithTimeout(url, 5000);
+    const res = await fetchWithTimeout(url, 10000);
     if (!res?.ok) {
       console.log(`[TeamDefense] Failed for ${teamAbbrev}: ${res?.status}`);
       return null;
